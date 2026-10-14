@@ -314,6 +314,10 @@ type Configuration struct {
 	// This is a runtime option and is not read from config.yml.
 	RecordDiscardedTokens bool
 
+	// DiscardRecordLimit caps the recorded replacements (0: no cap). Beyond it,
+	// XRefTable.Discards marks the affected objects as saturated instead.
+	DiscardRecordLimit int
+
 	// UnsupportedResourcePolicy controls unsupported-resource handling during extraction.
 	// This is a runtime option and is not read from config.yml.
 	UnsupportedResourcePolicy UnsupportedResourcePolicy

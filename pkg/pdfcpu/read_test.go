@@ -400,7 +400,7 @@ func TestParseTrailerClassifiesMissingEntries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := parseTrailer(tt.table, tt.d, 0); !errors.Is(err, tt.wantErr) {
+			if err := parseTrailer(tt.table, tt.d, 0, false); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("got %v, want %v", err, tt.wantErr)
 			}
 		})

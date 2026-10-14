@@ -378,12 +378,17 @@ func parseArray(c context.Context, line *string, level, maxDepth, validationMode
 	}
 
 	a := types.Array{}
+	discards := discardScopeOf(c)
 
 	for !strings.HasPrefix(l, "]") {
 
-		pop := pushDiscardPath(c, strconv.Itoa(len(a)))
+		if discards != nil {
+			discards.pushIndex(len(a))
+		}
 		obj, err := parseObject(c, &l, level+1, maxDepth, validationMode, repair)
-		pop()
+		if discards != nil {
+			discards.pop()
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -587,6 +592,7 @@ func processDictKeys(c context.Context, line *string, level, maxDepth, validatio
 	l := *line
 	var eol bool
 	d := types.NewDict()
+	discards := discardScopeOf(c)
 
 	for dictString(l) {
 
@@ -626,9 +632,13 @@ func processDictKeys(c context.Context, line *string, level, maxDepth, validatio
 			// #252: For dicts with kv pairs terminated by eol we accept a missing value as an empty string.
 			val = types.StringLiteral("")
 		} else {
-			pop := pushDiscardPath(c, string(*keyName))
+			if discards != nil {
+				discards.pushKey(string(*keyName))
+			}
 			val, err = parseObject(c, &l, level+1, maxDepth, validationMode, repair)
-			pop()
+			if discards != nil {
+				discards.pop()
+			}
 			if err != nil {
 				return nil, err
 			}

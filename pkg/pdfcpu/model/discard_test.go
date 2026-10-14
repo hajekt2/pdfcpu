@@ -26,7 +26,7 @@ import (
 func parseWithDiscards(t *testing.T, s string, log *DiscardLog) string {
 	t.Helper()
 	line := s
-	result, err := ParseObjectWithPolicy(WithDiscardScope(context.Background(), log, 7), &line, 0, ValidationRelaxed)
+	result, err := ParseObjectWithPolicy(WithDiscardScope(context.Background(), log, 7, -1), &line, 0, ValidationRelaxed)
 	if err != nil {
 		t.Fatalf("parse %q: %v", s, err)
 	}
@@ -61,12 +61,12 @@ func TestDiscardLogIgnoresValidTokensAndNilLog(t *testing.T) {
 		t.Fatalf("valid tokens recorded: %+v", log.Records)
 	}
 	c := context.Background()
-	if WithDiscardScope(c, nil, 1) != c {
+	if WithDiscardScope(c, nil, 1, -1) != c {
 		t.Fatal("a nil log must not install a scope")
 	}
 	var none *DiscardLog
 	none.BeginTrailer()
-	none.EndTrailer(0, map[string]bool{"Info": true})
+	none.EndTrailer(0, map[string]bool{"Info": true}, nil, false)
 }
 
 func TestDiscardLogMarksConsultedTrailerEntries(t *testing.T) {
@@ -78,12 +78,60 @@ func TestDiscardLogMarksConsultedTrailerEntries(t *testing.T) {
 		DiscardedToken{ObjectNumber: 0, Path: []string{"Root"}},
 		DiscardedToken{ObjectNumber: 5, Path: []string{"Info"}},
 	)
-	log.EndTrailer(0, map[string]bool{"Info": true, "Root": false})
+	log.EndTrailer(0, map[string]bool{"Info": true, "Root": false}, nil, false)
 	marks := []bool{}
 	for _, r := range log.Records {
 		marks = append(marks, r.Trailer)
 	}
 	if fmt.Sprint(marks) != "[false true false false]" {
 		t.Fatalf("trailer marks = %v", marks)
+	}
+}
+
+func TestDiscardLogCapsRecordsAndMarksSaturation(t *testing.T) {
+	log := &DiscardLog{MaxRecords: 2}
+	parseWithDiscards(t, "<< /A [<zz> <zz> foo 1.2.3] /B <zz> >>", log)
+	if len(log.Records) != 2 || !log.Saturated[7] {
+		t.Fatalf("records=%d saturated=%v", len(log.Records), log.Saturated)
+	}
+	// The same object and path is recorded once, so a re-parse adds nothing.
+	again := &DiscardLog{}
+	parseWithDiscards(t, "<< /A <zz> >>", again)
+	parseWithDiscards(t, "<< /A <zz> >>", again)
+	if len(again.Records) != 1 {
+		t.Fatalf("duplicate records: %+v", again.Records)
+	}
+}
+
+func TestDiscardLogRepairSupersedesOlderTrailerMarks(t *testing.T) {
+	log := &DiscardLog{}
+	log.BeginTrailer()
+	log.Records = append(log.Records, DiscardedToken{ObjectNumber: 0, Path: []string{"Info"}})
+	log.EndTrailer(0, map[string]bool{"Info": true}, map[string]bool{}, true)
+	if !log.Records[0].Trailer {
+		t.Fatal("older trailer entry not consulted")
+	}
+	log.BeginTrailer()
+	log.EndTrailer(0, map[string]bool{"Info": true}, map[string]bool{"Info": true}, true)
+	if log.Records[0].Trailer {
+		t.Fatal("a newer repaired trailer supplying Info did not supersede the older mark")
+	}
+}
+
+// With recording off, the discard path adds no allocation per array member:
+// the parse costs what upstream's does (one allocation per member here).
+func TestDiscardPathIsFreeWhenRecordingIsOff(t *testing.T) {
+	allocs := func(members int) float64 {
+		input := "[" + strings.Repeat("0 ", members) + "]"
+		return testing.AllocsPerRun(10, func() {
+			line := input
+			if _, err := ParseObjectWithPolicy(context.Background(), &line, 0, ValidationRelaxed); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	perMember := (allocs(1001) - allocs(1)) / 1000
+	if perMember > 1.05 {
+		t.Fatalf("recording off allocates %.2f times per array member", perMember)
 	}
 }

@@ -113,7 +113,7 @@ func (xRefTable *XRefTable) indRefToObject(ir *types.IndirectRef, decodeLazy boo
 	}
 
 	if l, ok := entry.Object.(types.LazyObjectStreamObject); ok && decodeLazy {
-		ob, err := l.DecodedObject(WithDiscardScope(context.TODO(), xRefTable.Discards, ir.ObjectNumber.Value()))
+		ob, err := l.DecodedObject(WithDiscardScope(context.TODO(), xRefTable.Discards, ir.ObjectNumber.Value(), -1))
 		if err != nil {
 			return nil, 0, err
 		}

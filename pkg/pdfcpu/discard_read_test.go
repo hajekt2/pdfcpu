@@ -95,10 +95,15 @@ func discardCompressed(objects []string, trailer string) []byte {
 }
 
 func discardRead(t *testing.T, data []byte, record bool) (*model.Context, string) {
+	return discardReadLimited(t, data, record, 0)
+}
+
+func discardReadLimited(t *testing.T, data []byte, record bool, limit int) (*model.Context, string) {
 	t.Helper()
 	conf := model.NewStatelessConfiguration()
 	conf.ValidationMode = model.ValidationStrict
 	conf.RecordDiscardedTokens = record
+	conf.DiscardRecordLimit = limit
 	ctx, err := Read(context.Background(), bytes.NewReader(data), conf)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -156,5 +161,99 @@ func TestReadRecordsDiscardedTokens(t *testing.T) {
 				t.Fatalf("records = %v, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+// discardIncremental writes objects, then an update section that rewrites the
+// objects in newer, each section with its own trailer entries. With corrupt,
+// every startxref is off by three bytes, so the reader rebuilds the xref by
+// scanning every object version and trailer in file order.
+func discardIncremental(objects []string, newer map[int]string, trailer, newerTrailer string, corrupt bool) []byte {
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.7\n")
+	offsets := []int{}
+	for i, o := range objects {
+		offsets = append(offsets, b.Len())
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	shift := 0
+	if corrupt {
+		shift = 3
+	}
+	xref := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for _, off := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R%s >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, trailer, xref+shift)
+	ids := []int{}
+	for id := range newer {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	updated := map[int]int{}
+	for _, id := range ids {
+		updated[id] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", id, newer[id])
+	}
+	next := b.Len()
+	b.WriteString("xref\n")
+	for _, id := range ids {
+		fmt.Fprintf(&b, "%d 1\n%010d 00000 n \n", id, updated[id])
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R%s /Prev %d >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, newerTrailer, xref, next+shift)
+	return b.Bytes()
+}
+
+func TestReadRecordsOnlyLoadedVersionsWhenRepairing(t *testing.T) {
+	good, bad := discardObjects("(en)"), discardObjects("<zz>")
+	for _, tt := range []struct {
+		name string
+		data []byte
+		live bool   // the Lang record belongs to the loaded catalog version
+		info string // expected trailer Info record, if any
+	}{
+		{"older catalog version bad", discardIncremental(bad, map[int]string{1: good[0]}, " /Info 4 0 R", " /Info 4 0 R", true), false, ""},
+		{"newest catalog version bad", discardIncremental(good, map[int]string{1: bad[0]}, " /Info 4 0 R", " /Info 4 0 R", true), true, ""},
+		{"older trailer Info bad", discardIncremental(good, map[int]string{4: "<< /Title (u) >>"}, " /Info <zz>", " /Info 4 0 R", true), false, "0:Info:hex:false"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			on, recorded := discardRead(t, tt.data, true)
+			_, plain := discardRead(t, tt.data, false)
+			if recorded != plain {
+				t.Fatal("recording changed normalized objects")
+			}
+			entry := on.XRefTable.Table[1]
+			langLive, langSuperseded, trailer := false, false, ""
+			for _, r := range on.XRefTable.Discards.Records {
+				if r.ObjectNumber == 1 && r.Offset == *entry.Offset {
+					langLive = true
+				}
+				if r.ObjectNumber == 1 && r.Offset >= 0 && r.Offset != *entry.Offset {
+					langSuperseded = true
+				}
+				if r.ObjectNumber == 0 {
+					trailer = fmt.Sprintf("%d:%s:%s:%t", r.ObjectNumber, strings.Join(r.Path, "/"), r.Kind, r.Trailer)
+				}
+			}
+			// The repair scan parses the superseded version too; its record
+			// carries that version's offset, not the loaded one.
+			if tt.name == "older catalog version bad" && !langSuperseded {
+				t.Fatal("repair scan did not record the superseded version at its own offset")
+			}
+			if langLive != tt.live || trailer != tt.info {
+				t.Fatalf("live Lang record=%t trailer=%q records=%+v", langLive, trailer, on.XRefTable.Discards.Records)
+			}
+		})
+	}
+}
+
+func TestReadCapsDiscardRecords(t *testing.T) {
+	objects := discardObjects("<zz>")
+	objects[3] = "<< /Title (t) /A [<zz> foo 1.2.3 <zz>] >>"
+	on, _ := discardReadLimited(t, discardClassic(objects, " /Info 4 0 R", false, ""), true, 2)
+	log := on.XRefTable.Discards
+	if len(log.Records) != 2 || !log.Saturated[4] {
+		t.Fatalf("records=%+v saturated=%v", log.Records, log.Saturated)
 	}
 }

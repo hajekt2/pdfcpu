@@ -215,7 +215,7 @@ type XRefTable struct {
 func newXRefTable(conf *Configuration) (xRefTable *XRefTable) {
 	var discards *DiscardLog
 	if conf.RecordDiscardedTokens {
-		discards = &DiscardLog{}
+		discards = &DiscardLog{MaxRecords: conf.DiscardRecordLimit}
 	}
 	return &XRefTable{
 		Discards:          discards,

@@ -935,7 +935,7 @@ func processXRefStream(ctx *model.Context, xsd *types.XRefStreamDict, objNr *int
 		log.Read.Println("processXRefStream: begin")
 	}
 
-	if err = parseTrailer(ctx.XRefTable, xsd.Dict, *objNr); err != nil {
+	if err = parseTrailer(ctx.XRefTable, xsd.Dict, *objNr, false); err != nil {
 		return nil, err
 	}
 
@@ -997,7 +997,7 @@ func parseXRefStream(c context.Context, ctx *model.Context, rd io.Reader, offset
 	}
 
 	ctx.XRefTable.Discards.BeginTrailer()
-	o, err := parseObjectWithValidationPolicy(c, ctx, &l, *objNr)
+	o, err := parseObjectWithValidationPolicy(c, ctx, &l, *objNr, *offset)
 	if err != nil {
 		return nil, fmt.Errorf("parseXRefStream: no object: %w", err)
 	}
@@ -1185,7 +1185,7 @@ func parseTrailerID(xRefTable *model.XRefTable, d types.Dict) error {
 }
 
 // Parse trailer dict and return any offset of a previous xref section.
-func parseTrailer(xRefTable *model.XRefTable, d types.Dict, source int) error {
+func parseTrailer(xRefTable *model.XRefTable, d types.Dict, source int, repairing bool) error {
 	if log.ReadEnabled() {
 		log.Read.Println("parseTrailer begin")
 	}
@@ -1195,7 +1195,13 @@ func parseTrailer(xRefTable *model.XRefTable, d types.Dict, source int) error {
 		"Size": xRefTable.Size == nil, "Root": xRefTable.Root == nil, "ID": xRefTable.ID == nil,
 		"Info": xRefTable.Info == nil && xRefTable.DirectInfoDict == nil,
 	}
-	defer xRefTable.Discards.EndTrailer(source, consulted)
+	defer func() {
+		supplied := map[string]bool{
+			"Size": consulted["Size"] && xRefTable.Size != nil, "Root": consulted["Root"] && xRefTable.Root != nil,
+			"ID": consulted["ID"] && xRefTable.ID != nil, "Info": consulted["Info"] && (xRefTable.Info != nil || xRefTable.DirectInfoDict != nil),
+		}
+		xRefTable.Discards.EndTrailer(source, consulted, supplied, repairing)
+	}()
 
 	if indRef := d.IndirectRefEntry("Encrypt"); indRef != nil {
 		xRefTable.Encrypt = indRef
@@ -1354,7 +1360,7 @@ func parseTrailerDict(c context.Context, ctx *model.Context, trailerDict types.D
 
 	xRefTable := ctx.XRefTable
 
-	if err := parseTrailer(xRefTable, trailerDict, 0); err != nil {
+	if err := parseTrailer(xRefTable, trailerDict, 0, repairing); err != nil {
 		return nil, err
 	}
 
@@ -1512,7 +1518,7 @@ func processTrailer(c context.Context, ctx *model.Context, s *bufio.Scanner, lin
 	}
 
 	ctx.XRefTable.Discards.BeginTrailer()
-	o, err := parseObjectWithValidationPolicy(c, ctx, &trailerString, 0)
+	o, err := parseObjectWithValidationPolicy(c, ctx, &trailerString, 0, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -2698,8 +2704,8 @@ func dict(c context.Context, ctx *model.Context, d1 types.Dict, objNr, genNr, en
 	return d2, nil
 }
 
-func parseObjectWithValidationPolicy(c context.Context, ctx *model.Context, line *string, objNr int) (types.Object, error) {
-	c = model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr)
+func parseObjectWithValidationPolicy(c context.Context, ctx *model.Context, line *string, objNr int, offset int64) (types.Object, error) {
+	c = model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr, offset)
 	result, err := model.ParseObjectWithPolicy(c, line, 0, ctx.XRefTable.ValidationMode, recursionLimit(ctx))
 	if result.StrictFailure == nil {
 		return result.Object, err
@@ -2867,7 +2873,7 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		return nil, endInd, streamInd, streamOffset, err
 	}
 
-	o, err = parseObjectWithValidationPolicy(c, ctx, &l, objNr)
+	o, err = parseObjectWithValidationPolicy(c, ctx, &l, objNr, offset)
 
 	return o, endInd, streamInd, streamOffset, err
 }
@@ -2963,7 +2969,7 @@ func dereferencedObject(c context.Context, ctx *model.Context, objNr int) (types
 
 		entry.Object = o
 	} else if l, ok := entry.Object.(types.LazyObjectStreamObject); ok {
-		o, err := l.DecodedObject(model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr))
+		o, err := l.DecodedObject(model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr, -1))
 		if err != nil {
 			return nil, fmt.Errorf("problem dereferencing object %d: %w", objNr, err)
 		}
