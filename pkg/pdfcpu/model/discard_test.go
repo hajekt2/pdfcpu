@@ -91,7 +91,7 @@ func TestDiscardLogMarksConsultedTrailerEntries(t *testing.T) {
 func TestDiscardLogCapsRecordsAndMarksSaturation(t *testing.T) {
 	log := &DiscardLog{MaxRecords: 2}
 	parseWithDiscards(t, "<< /A [<zz> <zz> foo 1.2.3] /B <zz> >>", log)
-	if len(log.Records) != 2 || !log.Saturated[7] {
+	if len(log.Records) != 2 || !log.Saturated[DiscardSite{7, -1}] {
 		t.Fatalf("records=%d saturated=%v", len(log.Records), log.Saturated)
 	}
 	// The same object and path is recorded once, so a re-parse adds nothing.
@@ -133,5 +133,20 @@ func TestDiscardPathIsFreeWhenRecordingIsOff(t *testing.T) {
 	perMember := (allocs(1001) - allocs(1)) / 1000
 	if perMember > 1.05 {
 		t.Fatalf("recording off allocates %.2f times per array member", perMember)
+	}
+}
+
+func TestDiscardLogSaturatesOnlyConsultedTrailerKeys(t *testing.T) {
+	log := &DiscardLog{MaxRecords: 1, Records: []DiscardedToken{{ObjectNumber: 3}}}
+	log.BeginTrailer()
+	parseWithDiscards(t, "<< /Foo foo /Info <zz> >>", log)
+	log.EndTrailer(7, map[string]bool{"Info": true}, nil, false)
+	if !log.SaturatedTrailerKeys["Info"] || log.SaturatedTrailerKeys["Foo"] {
+		t.Fatalf("saturated trailer keys = %v", log.SaturatedTrailerKeys)
+	}
+	log.BeginTrailer()
+	log.EndTrailer(0, map[string]bool{"Info": true}, map[string]bool{"Info": true}, true)
+	if log.SaturatedTrailerKeys["Info"] {
+		t.Fatal("a newer repaired trailer supplying Info did not supersede the saturated key")
 	}
 }

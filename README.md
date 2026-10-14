@@ -9,8 +9,9 @@
 > read as 0. `XRefTable.Discards` lists each record with its object number, the
 > file offset of the parsed object version, its key/index path inside the
 > object, its kind, and whether it is a consulted trailer entry.
-> `Configuration.DiscardRecordLimit` caps the distinct records; beyond it, the
-> affected objects are only marked as saturated. Parsed objects are identical
+> `Configuration.DiscardRecordLimit` caps the distinct records; beyond it, only
+> the affected object versions and consulted trailer keys are marked as
+> saturated. Parsed objects are identical
 > with recording on or off, and recording is off by default. Changed files carry a modification notice; the
 > licence is unchanged (Apache-2.0, see LICENSE.txt). The fork is retired if
 > upstream pdfcpu accepts an equivalent hook.

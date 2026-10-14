@@ -41,27 +41,36 @@ type DiscardedToken struct {
 	Trailer bool
 }
 
+// DiscardSite identifies one parsed object version: its object number and the
+// file offset of a classic version (-1 otherwise).
+type DiscardSite struct {
+	ObjectNumber int
+	Offset       int64
+}
+
 // DiscardLog collects DiscardedToken records. It is nil unless
 // Configuration.RecordDiscardedTokens is set. With MaxRecords > 0 it keeps at
-// most MaxRecords distinct records; further replacements only mark their
-// object in Saturated, so memory stays proportional to the number of objects.
+// most MaxRecords distinct records; further replacements only mark their object
+// version in Saturated, so memory stays proportional to the number of objects.
 type DiscardLog struct {
 	Records []DiscardedToken
 
-	// Saturated lists objects with replacements that were not recorded
+	// Saturated lists object versions with replacements that were not recorded
 	// individually because the log was full.
-	Saturated map[int]bool
+	Saturated map[DiscardSite]bool
 
-	// TrailerSaturated is set when a trailer or xref stream dictionary lost
-	// replacements to the cap.
-	TrailerSaturated bool
+	// SaturatedTrailerKeys lists consulted trailer keys whose replacements were
+	// not recorded because the log was full. While repairing, a newer trailer
+	// that supplies a key clears it, as for records.
+	SaturatedTrailerKeys map[string]bool
 
 	// MaxRecords caps len(Records); 0 means no cap.
 	MaxRecords int
 
-	seen         map[string]struct{}
-	trailerStart int
-	inTrailer    bool
+	seen           map[string]struct{}
+	trailerStart   int
+	inTrailer      bool
+	pendingTrailer map[string]bool
 }
 
 // BeginTrailer is called by the reader before it parses a trailer dictionary
@@ -88,7 +97,21 @@ func (l *DiscardLog) EndTrailer(source int, consulted, supplied map[string]bool,
 				r.Trailer = false
 			}
 		}
+		for key := range supplied {
+			if supplied[key] {
+				delete(l.SaturatedTrailerKeys, key)
+			}
+		}
 	}
+	for key := range l.pendingTrailer {
+		if consulted[key] {
+			if l.SaturatedTrailerKeys == nil {
+				l.SaturatedTrailerKeys = map[string]bool{}
+			}
+			l.SaturatedTrailerKeys[key] = true
+		}
+	}
+	l.pendingTrailer = nil
 	for i := l.trailerStart; i < len(l.Records); i++ {
 		r := &l.Records[i]
 		if r.ObjectNumber == source && len(r.Path) > 0 && consulted[r.Path[0]] {
@@ -139,17 +162,24 @@ func recordDiscard(c context.Context, kind string) {
 
 func (s *discardScope) record(kind string) {
 	l := s.log
-	if s.saturated {
+	if s.saturated && !l.inTrailer {
 		return
 	}
 	if l.MaxRecords > 0 && len(l.Records) >= l.MaxRecords {
-		s.saturated = true
-		if l.Saturated == nil {
-			l.Saturated = map[int]bool{}
+		if !s.saturated {
+			s.saturated = true
+			if l.Saturated == nil {
+				l.Saturated = map[DiscardSite]bool{}
+			}
+			l.Saturated[DiscardSite{s.object, s.offset}] = true
 		}
-		l.Saturated[s.object] = true
-		if l.inTrailer {
-			l.TrailerSaturated = true
+		// A trailer keeps the top-level key of each lost replacement, so only
+		// consulted keys count as saturated.
+		if l.inTrailer && len(s.path) > 0 {
+			if l.pendingTrailer == nil {
+				l.pendingTrailer = map[string]bool{}
+			}
+			l.pendingTrailer[s.path[0].key] = true
 		}
 		return
 	}

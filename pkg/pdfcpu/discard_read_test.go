@@ -253,7 +253,7 @@ func TestReadCapsDiscardRecords(t *testing.T) {
 	objects[3] = "<< /Title (t) /A [<zz> foo 1.2.3 <zz>] >>"
 	on, _ := discardReadLimited(t, discardClassic(objects, " /Info 4 0 R", false, ""), true, 2)
 	log := on.XRefTable.Discards
-	if len(log.Records) != 2 || !log.Saturated[4] {
+	if len(log.Records) != 2 || !log.Saturated[model.DiscardSite{ObjectNumber: 4, Offset: int64(*on.XRefTable.Table[4].Offset)}] {
 		t.Fatalf("records=%+v saturated=%v", log.Records, log.Saturated)
 	}
 }
