@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
+// recording of tokens the relaxed parser replaces. See README.md, "Fork note".
+
 package model
 
 import (
@@ -306,6 +309,10 @@ type Configuration struct {
 
 	// Validate against ISO-32000: strict or relaxed.
 	ValidationMode int
+
+	// RecordDiscardedTokens collects relaxed-parser token replacements in XRefTable.Discards.
+	// This is a runtime option and is not read from config.yml.
+	RecordDiscardedTokens bool
 
 	// UnsupportedResourcePolicy controls unsupported-resource handling during extraction.
 	// This is a runtime option and is not read from config.yml.

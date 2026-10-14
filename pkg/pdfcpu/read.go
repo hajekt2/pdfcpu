@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
+// recording of tokens the relaxed parser replaces. See README.md, "Fork note".
+
 package pdfcpu
 
 import (
@@ -932,7 +935,7 @@ func processXRefStream(ctx *model.Context, xsd *types.XRefStreamDict, objNr *int
 		log.Read.Println("processXRefStream: begin")
 	}
 
-	if err = parseTrailer(ctx.XRefTable, xsd.Dict); err != nil {
+	if err = parseTrailer(ctx.XRefTable, xsd.Dict, *objNr); err != nil {
 		return nil, err
 	}
 
@@ -993,6 +996,7 @@ func parseXRefStream(c context.Context, ctx *model.Context, rd io.Reader, offset
 		log.Read.Printf("parseXRefStream: dereferencing object %d\n", *objNr)
 	}
 
+	ctx.XRefTable.Discards.BeginTrailer()
 	o, err := parseObjectWithValidationPolicy(c, ctx, &l, *objNr)
 	if err != nil {
 		return nil, fmt.Errorf("parseXRefStream: no object: %w", err)
@@ -1181,10 +1185,17 @@ func parseTrailerID(xRefTable *model.XRefTable, d types.Dict) error {
 }
 
 // Parse trailer dict and return any offset of a previous xref section.
-func parseTrailer(xRefTable *model.XRefTable, d types.Dict) error {
+func parseTrailer(xRefTable *model.XRefTable, d types.Dict, source int) error {
 	if log.ReadEnabled() {
 		log.Read.Println("parseTrailer begin")
 	}
+
+	consulted := map[string]bool{
+		"Encrypt": true, "Prev": true, "XRefStm": true,
+		"Size": xRefTable.Size == nil, "Root": xRefTable.Root == nil, "ID": xRefTable.ID == nil,
+		"Info": xRefTable.Info == nil && xRefTable.DirectInfoDict == nil,
+	}
+	defer xRefTable.Discards.EndTrailer(source, consulted)
 
 	if indRef := d.IndirectRefEntry("Encrypt"); indRef != nil {
 		xRefTable.Encrypt = indRef
@@ -1343,7 +1354,7 @@ func parseTrailerDict(c context.Context, ctx *model.Context, trailerDict types.D
 
 	xRefTable := ctx.XRefTable
 
-	if err := parseTrailer(xRefTable, trailerDict); err != nil {
+	if err := parseTrailer(xRefTable, trailerDict, 0); err != nil {
 		return nil, err
 	}
 
@@ -1500,6 +1511,7 @@ func processTrailer(c context.Context, ctx *model.Context, s *bufio.Scanner, lin
 		log.Read.Printf("processTrailer: trailerString: (len:%d) <%s>\n", len(trailerString), trailerString)
 	}
 
+	ctx.XRefTable.Discards.BeginTrailer()
 	o, err := parseObjectWithValidationPolicy(c, ctx, &trailerString, 0)
 	if err != nil {
 		return nil, err
@@ -2687,6 +2699,7 @@ func dict(c context.Context, ctx *model.Context, d1 types.Dict, objNr, genNr, en
 }
 
 func parseObjectWithValidationPolicy(c context.Context, ctx *model.Context, line *string, objNr int) (types.Object, error) {
+	c = model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr)
 	result, err := model.ParseObjectWithPolicy(c, line, 0, ctx.XRefTable.ValidationMode, recursionLimit(ctx))
 	if result.StrictFailure == nil {
 		return result.Object, err
@@ -2950,7 +2963,7 @@ func dereferencedObject(c context.Context, ctx *model.Context, objNr int) (types
 
 		entry.Object = o
 	} else if l, ok := entry.Object.(types.LazyObjectStreamObject); ok {
-		o, err := l.DecodedObject(c)
+		o, err := l.DecodedObject(model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr))
 		if err != nil {
 			return nil, fmt.Errorf("problem dereferencing object %d: %w", objNr, err)
 		}

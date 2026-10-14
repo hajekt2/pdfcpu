@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
+// recording of tokens the relaxed parser replaces. See README.md, "Fork note".
+
 package model
 
 import (
@@ -110,7 +113,7 @@ func (xRefTable *XRefTable) indRefToObject(ir *types.IndirectRef, decodeLazy boo
 	}
 
 	if l, ok := entry.Object.(types.LazyObjectStreamObject); ok && decodeLazy {
-		ob, err := l.DecodedObject(context.TODO())
+		ob, err := l.DecodedObject(WithDiscardScope(context.TODO(), xRefTable.Discards, ir.ObjectNumber.Value()))
 		if err != nil {
 			return nil, 0, err
 		}

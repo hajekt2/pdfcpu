@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
+// recording of tokens the relaxed parser replaces. See README.md, "Fork note".
+
 package pdfcpu
 
 import (
@@ -397,7 +400,7 @@ func TestParseTrailerClassifiesMissingEntries(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := parseTrailer(tt.table, tt.d); !errors.Is(err, tt.wantErr) {
+			if err := parseTrailer(tt.table, tt.d, 0); !errors.Is(err, tt.wantErr) {
 				t.Fatalf("got %v, want %v", err, tt.wantErr)
 			}
 		})

@@ -14,6 +14,9 @@
 	limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
+// recording of tokens the relaxed parser replaces. See README.md, "Fork note".
+
 package model
 
 import (
@@ -124,6 +127,7 @@ type XRefTable struct {
 	PageCount           int                // Number of pages.
 	Root                *types.IndirectRef // Pointer to catalog (reference to root object).
 	RootDict            types.Dict         // Catalog
+	Discards            *DiscardLog        // Relaxed-parser token replacements, if recorded.
 	Names               map[string]*Node   // Cache for name trees as found in catalog.
 	Dests               types.Dict         // Named destinations
 	NameRefs            map[string]NameMap // Name refs for merging only
@@ -209,7 +213,12 @@ type XRefTable struct {
 // NewXRefTable creates a new XRefTable.
 // TODO Export
 func newXRefTable(conf *Configuration) (xRefTable *XRefTable) {
+	var discards *DiscardLog
+	if conf.RecordDiscardedTokens {
+		discards = &DiscardLog{}
+	}
 	return &XRefTable{
+		Discards:          discards,
 		Table:             map[int]*XRefTableEntry{},
 		Names:             map[string]*Node{},
 		NameRefs:          map[string]NameMap{},

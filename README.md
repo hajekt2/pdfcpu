@@ -1,5 +1,18 @@
 # pdfcpu: PDF tooling for Go and the command line
 
+> **Fork note (hajekt2/pdfcpu, branch `uacheck/discard-log`).** This fork of
+> [pdfcpu](https://github.com/pdfcpu/pdfcpu) v0.16.2 carries one small, opt-in
+> patch for the [uacheck](https://github.com/hajekt2/uacheck) PDF accessibility
+> checker. When `Configuration.RecordDiscardedTokens` is set, the reader records
+> each token its relaxed parser replaces instead of rejecting: an invalid hex
+> string or an unparseable bare token read as null, or an out-of-range integer
+> read as 0. `XRefTable.Discards` lists each record with its object number, its
+> key/index path inside the object, its kind, and whether it is a consulted
+> trailer entry. Parsed objects are identical with recording on or off, and
+> recording is off by default. Changed files carry a modification notice; the
+> licence is unchanged (Apache-2.0, see LICENSE.txt). The fork is retired if
+> upstream pdfcpu accepts an equivalent hook.
+
 [![Test](https://github.com/pdfcpu/pdfcpu/workflows/Test/badge.svg)](https://github.com/pdfcpu/pdfcpu/actions)
 [![Coverage Status](https://coveralls.io/repos/github/pdfcpu/pdfcpu/badge.svg?branch=master)](https://coveralls.io/github/pdfcpu/pdfcpu?branch=master)
 [![Go Reference](https://pkg.go.dev/badge/github.com/pdfcpu/pdfcpu.svg)](https://pkg.go.dev/github.com/pdfcpu/pdfcpu)

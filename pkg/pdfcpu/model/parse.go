@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
+// recording of tokens the relaxed parser replaces. See README.md, "Fork note".
+
 package model
 
 import (
@@ -378,7 +381,9 @@ func parseArray(c context.Context, line *string, level, maxDepth, validationMode
 
 	for !strings.HasPrefix(l, "]") {
 
+		pop := pushDiscardPath(c, strconv.Itoa(len(a)))
 		obj, err := parseObject(c, &l, level+1, maxDepth, validationMode, repair)
+		pop()
 		if err != nil {
 			return nil, err
 		}
@@ -621,7 +626,10 @@ func processDictKeys(c context.Context, line *string, level, maxDepth, validatio
 			// #252: For dicts with kv pairs terminated by eol we accept a missing value as an empty string.
 			val = types.StringLiteral("")
 		} else {
-			if val, err = parseObject(c, &l, level+1, maxDepth, validationMode, repair); err != nil {
+			pop := pushDiscardPath(c, string(*keyName))
+			val, err = parseObject(c, &l, level+1, maxDepth, validationMode, repair)
+			pop()
+			if err != nil {
 				return nil, err
 			}
 		}
@@ -823,6 +831,8 @@ func parseFloat(s string) (types.Object, error) {
 	return types.Float(f), nil
 }
 
+var errIntegerRangeRepaired = errors.New("pdfcpu: integer out of range read as 0")
+
 func parseNumericOrIndRef(line *string) (types.Object, error) {
 	if noBuf(line) {
 		return nil, errBufNotAvailable
@@ -839,10 +849,9 @@ func parseNumericOrIndRef(line *string) (types.Object, error) {
 	i, err := strconv.Atoi(s)
 	if err != nil {
 		if isRangeError(err) {
-			// #407
-			i = 0
+			// #407: the caller records the repair and substitutes 0.
 			*line = l1
-			return types.Integer(i), nil
+			return nil, errIntegerRangeRepaired
 		}
 		*line = l1
 		return parseFloat(s)
@@ -915,6 +924,9 @@ func parseHexLiteralOrDict(c context.Context, l *string, level, maxDepth, valida
 		}
 		if val, err = parseHexLiteral(l); err != nil {
 			return nil, err
+		}
+		if val == nil {
+			recordDiscard(c, "hex")
 		}
 	}
 
@@ -1008,7 +1020,15 @@ func parseObjectValue(c context.Context, l *string, level, depthLimit, validatio
 		// int 0 r
 		// int
 		// float
-		return parseNumericOrIndRef(l)
+		value, err := parseNumericOrIndRef(l)
+		if err == nil && value == nil {
+			recordDiscard(c, "token")
+		}
+		if errors.Is(err, errIntegerRangeRepaired) {
+			recordDiscard(c, "integer-range")
+			value, err = types.Integer(0), nil
+		}
+		return value, err
 	}
 }
 
