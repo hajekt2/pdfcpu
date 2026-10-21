@@ -98,6 +98,9 @@ func main() {
 			if facts.FreeListHeadGenerationFixed {
 				counts["free_list_head_generation_fixed"]++
 			}
+			if facts.XRefSizeLowered {
+				counts["xref_size_lowered"]++
+			}
 			if legacy != nil {
 				counts["norepair_only_ok"]++
 			}

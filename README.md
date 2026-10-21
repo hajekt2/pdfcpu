@@ -17,12 +17,14 @@
 > upstream pdfcpu accepts equivalent reader hooks.
 >
 > `Configuration.NoRepair` defaults to false. When true, the reader refuses
-> recovery except for recorded object-0 free-list-head synthesis and generation
-> normalization. Other recovery returns `*model.RepairRefusedError`, containing
+> recovery except for recorded object-0 free-list-head synthesis, head generation
+> normalization and lowering an oversized xref `/Size` without changing selected
+> objects. Other recovery returns `*model.RepairRefusedError`, containing
 > a closed site code and numeric locations only. The policy remains active in lazy object-stream and
 > filter decoding after Read returns. Callers must check those later errors
 > before issuing a read certificate. `ctx.NoRepairNormalizations()` returns a
-> read-only snapshot of the two permitted normalization facts. See
+> read-only snapshot of the permitted normalization facts, including declared and
+> effective sizes. See
 > [NOREPAIR.md](NOREPAIR.md) for the complete read-path inventory,
 > normal-decoding classifications and tests.
 

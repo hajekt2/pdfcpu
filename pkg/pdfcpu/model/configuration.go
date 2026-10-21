@@ -313,7 +313,8 @@ type Configuration struct {
 	ValidationMode int
 
 	// NoRepair refuses reader recovery, including lazy parsing, except for recorded
-	// free-list-head synthesis and generation normalization. See NOREPAIR.md.
+	// free-list-head synthesis, head generation and oversized xref Size normalization.
+	// See NOREPAIR.md.
 	// It is an API-only, opt-in setting, independent of ValidationMode.
 	NoRepair bool
 

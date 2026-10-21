@@ -74,18 +74,47 @@ type RepairRefusedError struct {
 	Offset int64
 }
 
-// NoRepairNormalizations records the permitted object-0 normalizations during a
+// NoRepairNormalizations records the permitted reader normalizations during a
 // NoRepair read. These facts contain no source content and do not certify later
 // validation, optimization or writing.
 type NoRepairNormalizations struct {
 	FreeListHeadSynthesized     bool
 	FreeListHeadGenerationFixed bool
+	XRefSizeLowered             bool
+	XRefSizeDeclared            int
+	XRefSizeEffective           int
 }
 
 // NoRepairNormalizations returns a read-only snapshot of this table's facts.
 // Changing the returned value cannot change the context's record.
 func (xRefTable *XRefTable) NoRepairNormalizations() NoRepairNormalizations {
 	return xRefTable.noRepairNormalizations
+}
+
+// NormalizeReadXRefSize applies the final reader Size correction. NoRepair
+// permits only lowering an oversized declaration to one past the highest
+// selected entry, including free and null entries (ISO 32000-1 7.5.5).
+// It changes no entries or reference results and records only numeric facts.
+func (xRefTable *XRefTable) NormalizeReadXRefSize(size int) error {
+	if xRefTable.Size != nil && *xRefTable.Size == size {
+		return nil
+	}
+	if xRefTable.RepairsForbidden() {
+		highest := -1
+		for n := range xRefTable.Table {
+			if n > highest {
+				highest = n
+			}
+		}
+		if xRefTable.Size == nil || size <= 0 || *xRefTable.Size <= size || highest != size-1 {
+			return xRefTable.RefuseRepair(RepairXRefSize, -1, -1)
+		}
+		xRefTable.noRepairNormalizations.XRefSizeLowered = true
+		xRefTable.noRepairNormalizations.XRefSizeDeclared = *xRefTable.Size
+		xRefTable.noRepairNormalizations.XRefSizeEffective = size
+	}
+	xRefTable.Size = &size
+	return nil
 }
 
 func (e *RepairRefusedError) Error() string {

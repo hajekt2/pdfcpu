@@ -276,7 +276,7 @@ func TestNoRepairRecoveryFamilies(t *testing.T) {
 		{"truncated EOF", replace("%%EOF", "%%EO"), model.RepairEOF},
 		{"trailing epilog", append(bytes.Clone(clean), []byte("junk")...), model.RepairEOF},
 		{"trailer Size", replace("/Size 5", "/Size 0"), model.RepairXRefSize},
-		{"trailer Size maximum", replace("/Size 5", "/Size 8"), model.RepairXRefSize},
+		{"trailer Size too small", replace("/Size 5", "/Size 4"), model.RepairXRefSize},
 		{"ID duplication", discardClassic(discardObjects("(en)"), " /ID [<0102>]", false, ""), model.RepairTrailerID},
 		{"filter alias", noRepairStream("<< /Length 3 /Filter /AHx >>\nstream\n71>\nendstream"), model.RepairFilterName},
 		{"filter pipeline alias", noRepairStream("<< /Length 3 /Filter [/AHx] >>\nstream\n71>\nendstream"), model.RepairFilterPipeline},

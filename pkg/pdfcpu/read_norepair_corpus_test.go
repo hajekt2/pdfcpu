@@ -29,14 +29,15 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
-// This optional census observes Size before Read's final replacement. It does
-// not relax the production policy or interpret references inside stream data.
+// This optional census classifies recorded Size normalizations and refusals.
+// For final Size refusals it observes the source bound before replacement.
+// It does not relax the policy or interpret references inside stream data.
 func TestNoRepairXRefSizeCensus(t *testing.T) {
 	root := os.Getenv("PDFCPU_NOREPAIR_CORPUS")
 	if root == "" {
 		t.Skip("set PDFCPU_NOREPAIR_CORPUS to run the optional corpus census")
 	}
-	counts := map[string]int{"a_larger": 0, "b_smaller_referenced": 0, "c_smaller_unreferenced": 0, "d_other": 0}
+	counts := map[string]int{"a_larger": 0, "b_smaller_referenced": 0, "c_smaller_unreferenced": 0, "d_other": 0, "size_normalizations": 0, "size_refusals": 0}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -49,7 +50,16 @@ func TestNoRepairXRefSizeCensus(t *testing.T) {
 			return err
 		}
 		counts["files"]++
-		_, err = noRepairRead(data, true, model.ValidationStrict)
+		ctx, err := noRepairRead(data, true, model.ValidationStrict)
+		if err == nil && ctx.NoRepairNormalizations().XRefSizeLowered {
+			facts := ctx.NoRepairNormalizations()
+			if facts.XRefSizeDeclared <= facts.XRefSizeEffective || facts.XRefSizeEffective != maxObjectNumber(ctx.Table)+1 {
+				t.Fatalf("invalid Size normalization for %s: %+v", path, facts)
+			}
+			counts["size_normalizations"]++
+			counts["a_larger"]++
+			return nil
+		}
 		var refused *model.RepairRefusedError
 		if !errors.As(err, &refused) || refused.Site != model.RepairXRefSize {
 			return nil
@@ -62,7 +72,7 @@ func TestNoRepairXRefSizeCensus(t *testing.T) {
 
 		conf := model.NewStatelessConfiguration()
 		conf.ValidationMode = model.ValidationStrict
-		ctx, err := model.NewContext(bytes.NewReader(data), conf)
+		ctx, err = model.NewContext(bytes.NewReader(data), conf)
 		if err != nil {
 			return err
 		}
@@ -144,7 +154,7 @@ func TestNoRepairXRefSizeCensus(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Log(string(out))
-	if counts["size_refusals"] != counts["a_larger"]+counts["b_smaller_referenced"]+counts["c_smaller_unreferenced"]+counts["d_other"] {
+	if counts["size_refusals"]+counts["size_normalizations"] != counts["a_larger"]+counts["b_smaller_referenced"]+counts["c_smaller_unreferenced"]+counts["d_other"] {
 		t.Fatal("incomplete classification")
 	}
 }

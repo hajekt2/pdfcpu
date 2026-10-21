@@ -211,12 +211,8 @@ func Read(c context.Context, rs io.ReadSeeker, conf *model.Configuration) (*mode
 	}
 
 	// Some PDFWriters write an incorrect Size into trailer.
-	if ctx.XRefTable.Size == nil || *ctx.XRefTable.Size != ctx.MaxObjNr+1 {
-		maxObjNr := ctx.MaxObjNr + 1
-		if err := ctx.XRefTable.RefuseRepair(model.RepairXRefSize, -1, -1); err != nil {
-			return nil, err
-		}
-		ctx.XRefTable.Size = &maxObjNr
+	if err := ctx.XRefTable.NormalizeReadXRefSize(ctx.MaxObjNr + 1); err != nil {
+		return nil, err
 	}
 
 	if log.ReadEnabled() {

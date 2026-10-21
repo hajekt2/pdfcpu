@@ -2,8 +2,9 @@
 
 `Configuration.NoRepair` is an opt-in, API-only reader setting. It defaults to
 false and is independent of strict or relaxed validation. When enabled, the
-reader allows only the two recorded free-list-head normalizations below and
-refuses the first other recovery attempt with `*model.RepairRefusedError`.
+reader allows only the recorded free-list-head and oversized xref Size
+normalizations below. It refuses the first other recovery attempt with
+`*model.RepairRefusedError`.
 `errors.As` finds it through reader error wrappers. The error contains only a
 closed `model.RepairSite` code and numeric `Object` and `Offset` locations.
 Object -1 means unknown; object 0 identifies a classic trailer or free-list head.
@@ -42,10 +43,11 @@ changes cannot change the content selected for any in-use object.
 | Correct an existing free object 0's generation to 65535. | `FreeListHeadGenerationFixed` |
 
 `ctx.NoRepairNormalizations()` returns a `model.NoRepairNormalizations` value
-with only these two boolean facts. The context keeps the record private. Facts
-accumulate when a normalization occurs; an already-correct head adds no fact.
-They remain false when NoRepair is disabled. A synthesized head already has
-generation 65535, so synthesis alone does not set the generation-correction fact.
+with these two boolean facts and the Size facts described below. The context
+keeps the record private. Facts accumulate when a normalization occurs; an
+already-correct head adds no fact. All facts remain false or zero when NoRepair
+is disabled. A synthesized head already has generation 65535, so synthesis alone
+does not set the generation-correction fact.
 In `postProcess`, NoRepair defers synthesis to `EnsureValidFreeList`, which records
 it. The legacy path is unchanged.
 
@@ -56,6 +58,47 @@ linking omitted free entries; and resetting a permanently deleted entry's
 nonzero link. An allowed head normalization does not authorize any of these.
 `RepairFreeGeneration` remains a reserved enum value for API compatibility;
 object-0 generation correction no longer returns it.
+
+## Permitted oversized xref Size normalization
+
+Owner decision, 2026-10-21 (quote): "allow /Size too large".
+
+Only class (a) of the Size analysis below is allowed. At the end of `Read`, the
+declared trailer or xref-stream Size must exceed one plus the highest selected
+xref object number. The replacement must equal that exact bound, including free
+and unknown-type null entries. `NormalizeReadXRefSize` checks both conditions
+before changing Size or recording facts. It does not change any xref entry,
+generation, offset, stream data or source xref-stream dictionary.
+
+ISO 32000-1:2008 [7.5.5, Table 15](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf)
+defines Size as one greater than the highest object number in the combined xref
+sections. Section 7.5.8.2, Table 17 gives the equivalent xref-stream definition.
+Lowering an oversized bound to that value preserves every selected entry.
+References to absent entries still resolve to null, including entries between
+the effective and declared bounds. This allowance records a bound correction;
+it does not establish that the original declaration conformed to the standard.
+
+| Recorded fact | Meaning |
+| --- | --- |
+| `XRefSizeLowered` | The permitted correction occurred. |
+| `XRefSizeDeclared` | The selected source declaration before correction. |
+| `XRefSizeEffective` | One plus the highest selected xref object number after reading. |
+
+These are value-copy snapshot fields. They accumulate alongside the free-list
+facts and remain false or zero when no Size correction occurs or NoRepair is
+disabled. The policy remains active for subsequent lazy parsing and decoding.
+
+The exact Size remainder still refuses: (b) a smaller declaration with present,
+referenced objects at or above it; (c) a smaller declaration with unreferenced
+extra entries, including free-only extras; and (d) invalid declarations,
+Index/Size corrections, incomplete stream records, or a final correction whose
+target differs from one plus the highest selected entry. Missing or invalid
+values may retain an ordinary parse or resource-limit error. This allowance
+does not infer missing xref-stream records from an oversized implicit Index,
+scan for missing entries, raise Size, or authorize any correction that changes
+which objects resolve. All other repair sites keep their existing policy.
+
+## Certificate scope
 
 A successful initial read covers the initial phases only. A lazy member can
 still refuse later. A certificate consumer must materialize every object and
@@ -96,7 +139,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairXRefShift` | `tryXRefSection`: skipping whitespace at the declared offset, finding `xref` on a later line, or assigning `Read.RepairOffset`. Thus the later shifted-object retry in `dereferenceAndLoad` cannot run. |
 | `RepairXRefEntry` | `parseXRefTableEntry` / `decodeSubsection`: stripping offset prefixes, malformed numeric widths, reclassifying in-use object zero, skipping zero or sub-header in-use offsets. `extractXRefTableEntriesFromXRefStream` also rejects type-1 object zero and zero/sub-header source offsets before inserting an entry. `parseXRefTableSubSection`: skipping short rows or digesting entries beyond the declared count. `extractXRefTableEntriesFromXRefStream`: ignoring extra records outside Index. Incomplete rows that already fail retain their error or hit the guarded reconstruction route. |
 | `RepairXRefGeneration` | `parseXRefTableEntry` refuses the oversized generation that `decodeSubsection` would replace with zero. |
-| `RepairXRefSize` | `xRefStreamDict` selects bounded strict Index/Size parsing under either validation mode and translates correction candidates to this site. It never reaches the relaxed Size update. `parseTrailerSize` refuses discarding invalid Size. `Read` refuses final Size replacement after the object walk. |
+| `RepairXRefSize` | `xRefStreamDict` selects bounded strict Index/Size parsing under either validation mode and translates correction candidates to this site. It never reaches the relaxed Size update. `parseTrailerSize` refuses discarding invalid Size. At the end of `Read`, `NormalizeReadXRefSize` permits only the recorded oversized-bound correction above and refuses every other final replacement. |
 | `RepairXRefCycle` | `buildXRefTableStartingAt`: selecting an earlier epilog after revisiting an xref offset. |
 | `RepairEOF` | `offsetLastXRefSection`: truncated EOF acceptance, non-whitespace trailing epilog bytes, percent trimming from the offset, a missing separator after startxref, or discarding an out-of-range latest offset. Missing sections that would reconstruct use `RepairXRefReconstruction`. |
 | `RepairHeader` | `buildXRefTableStartingAt`: accepting a displaced header and adding its displacement to source offsets. |
@@ -285,3 +328,59 @@ snapshots matched the independent review's prior snapshots, with zero errors or
 differences. Private-corpus replay and other operating systems were not tested.
 No PAC validation semantics, new dependencies or additional normalization
 allowances were introduced.
+
+## Oversized Size allowance and corpus replay, 2026-10-21
+
+The results and unchanged-policy statements in the earlier reports above
+describe their recorded revisions through `d816f0a`. The later owner decision
+"allow /Size too large" now permits exactly class (a), as specified in
+"Permitted oversized xref Size normalization". Classes (b), (c) and (d) retain
+their refusals. The optional census now counts successful recorded Size
+normalizations as well as Size refusals; final refusals still use the source
+bound before replacement.
+
+The same frozen public corpus and strict read/materialization tool now report:
+
+| Outcome | Files / 527 public files |
+| --- | --- |
+| Default read succeeds | 527 |
+| NoRepair read succeeds | 526 |
+| `RepairFreeLink` (29) | 1 |
+| `RepairXRefSize` (6) | 0 |
+| Other refusal sites or ordinary read errors | 0 |
+
+All 227 former Size refusals now record `XRefSizeLowered`, with their declared
+and effective sizes. The census reports (a) 227, (b) 0, (c) 0, (d) 0, zero Size
+refusals and 227 Size normalizations. Among the 526 successful NoRepair reads,
+126 record head synthesis and 335 record head generation correction. Facts can
+overlap, so these counts must not be summed as disjoint outcomes.
+
+`read_norepair_size_test.go` covers class (a) in classic, explicitly indexed
+xref-stream and incremental PDFs, comparing resolved objects and object-stream
+bytes with default reads. It verifies snapshot isolation, combined head and
+Size facts, retained source xref-stream declarations and lazy refusal policy.
+It also covers smaller referenced, smaller unreferenced and free-only bounds,
+invalid declarations, Index/Size mismatches, incomplete implicit Index records,
+and a correction that would exclude a selected free or in-use entry. Both
+strict and relaxed validation modes are exercised for the source fixtures.
+
+All 1,054 default strict/relaxed public snapshots match `d816f0a`, with zero
+read/serialization errors or differences. The snapshot comparison includes
+selected entries, serialized objects, raw/decoded stream bytes, decode errors,
+Size and reader/discard state. This is observed equivalence on these files.
+Private-corpus replay, the uacheck dependency pin and other operating systems
+remain outside this lane. No new dependency or PAC validation semantics were
+introduced. There are no INVENTION flags or open questions for this change.
+
+The final gates passed on Linux with Go 1.26.0. Each gate used a separate
+XDG_CONFIG_HOME to isolate the font cache:
+
+```sh
+XDG_CONFIG_HOME="$PWD/.git/f1d-validation/config-test" go test -p 1 ./...
+XDG_CONFIG_HOME="$PWD/.git/f1d-validation/config-race" go test -race -p 1 ./pkg/pdfcpu/...
+XDG_CONFIG_HOME="$PWD/.git/f1d-validation/config-vet" go vet ./...
+git diff --check
+```
+
+The corpus and census commands in the earlier report were rerun with the
+results above. Test-generated sample changes were removed after verification.
