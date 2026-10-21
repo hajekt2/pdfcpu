@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package filter
 
 import (
@@ -329,6 +331,9 @@ func (f flate) passThru(rin io.Reader, maxLen int64) (*bytes.Buffer, error) {
 		return b, fmt.Errorf("flate decode: %w", err)
 	}
 	if err == io.ErrUnexpectedEOF {
+		if f.repairError != nil {
+			return nil, f.repairError
+		}
 		logUnexpectedEOFFlateDecode()
 		err = nil
 	}
@@ -554,6 +559,9 @@ func (f flate) decodePostProcessRows(r io.Reader, maxLen int64, m, predictor, co
 		n, err := io.ReadFull(r, cr)
 		if err != nil {
 			if err == io.ErrUnexpectedEOF && n == 0 {
+				if f.repairError != nil {
+					return nil, f.repairError
+				}
 				logUnexpectedEOFFlateDecode()
 				break
 			}

@@ -10,6 +10,8 @@
 //
 // See the golang proposal: https://github.com/golang/go/issues/25409.
 
+// Modified in the hajekt2/pdfcpu fork: opt-in PDF termination checks.
+
 package lzw
 
 import (
@@ -27,13 +29,15 @@ const (
 // decoder is the state from which the readXxx method converts a byte
 // stream into a code stream.
 type decoder struct {
-	r        io.ByteReader
-	bits     uint32
-	nBits    uint
-	width    uint
-	read     func(*decoder) (uint16, error) // readMSB always for PDF and TIFF
-	litWidth uint                           // width in bits of literal codes
-	err      error
+	r           io.ByteReader
+	bits        uint32
+	nBits       uint
+	width       uint
+	read        func(*decoder) (uint16, error) // readMSB always for PDF and TIFF
+	litWidth    uint                           // width in bits of literal codes
+	err         error
+	repairError error
+	started     bool
 
 	// The first 1<<litWidth codes are literal codes.
 	// The next two codes mean clear and EOF.
@@ -127,12 +131,24 @@ loop:
 	for {
 		code, err := d.read(d)
 		if err != nil {
-			// Some PDF Writers write an EOD some don't.
-			// Don't insist on EOD marker.
-			// Don't return an unexpected EOF error.
+			// Legacy PDF/TIFF reads tolerate a missing EOD. A policy-managed
+			// PDF read must distinguish source EOF from the explicit code.
 			d.err = err
+			if err == io.EOF && d.repairError != nil {
+				d.err = d.repairError
+			}
 			break
 		}
+		if d.repairError != nil {
+			// ISO 32000-1 7.4.4.2 requires an initial CLEAR and a reset
+			// when the code table is full. EOD can end a full table.
+			if (!d.started && code != d.clear) ||
+				(d.hi >= uint16(len(d.prefix)) && code != d.clear && code != d.eof) {
+				d.err = d.repairError
+				break
+			}
+		}
+		d.started = true
 		switch {
 		case code < d.clear:
 			// We have a literal code.
@@ -147,6 +163,10 @@ loop:
 			continue
 		case code == d.eof:
 			d.err = io.EOF
+			// Unused low bits in the final byte must be zero.
+			if d.repairError != nil && d.bits != 0 {
+				d.err = d.repairError
+			}
 			break loop
 		case code <= d.hi:
 			c, i := code, len(d.output)-1
@@ -203,6 +223,12 @@ func (d *decoder) Close() error {
 // oneOff makes code length increases occur one code early. It should be true
 // for LZWDecode filters with earlyChange=1 which is also the default.
 func NewReader(r io.Reader, oneOff bool) io.ReadCloser {
+	return NewReaderWithRepairError(r, oneOff, nil)
+}
+
+// NewReaderWithRepairError refuses accepted PDF syntax defects with repairError.
+// A nil error preserves the permissive TIFF/PDF decoder.
+func NewReaderWithRepairError(r io.Reader, oneOff bool, repairError error) io.ReadCloser {
 	br, ok := r.(io.ByteReader)
 	if !ok {
 		br = bufio.NewReader(r)
@@ -213,15 +239,16 @@ func NewReader(r io.Reader, oneOff bool) io.ReadCloser {
 	width := 1 + lw
 
 	return &decoder{
-		r:        br,
-		read:     (*decoder).readMSB,
-		litWidth: lw,
-		width:    width,
-		clear:    clear,
-		eof:      clear + 1,
-		hi:       clear + 1,
-		overflow: uint16(1) << width,
-		last:     decoderInvalidCode,
-		oneOff:   oneOff,
+		repairError: repairError,
+		r:           br,
+		read:        (*decoder).readMSB,
+		litWidth:    lw,
+		width:       width,
+		clear:       clear,
+		eof:         clear + 1,
+		hi:          clear + 1,
+		overflow:    uint16(1) << width,
+		last:        decoderInvalidCode,
+		oneOff:      oneOff,
 	}
 }

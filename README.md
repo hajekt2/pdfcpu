@@ -1,8 +1,8 @@
 # pdfcpu: PDF tooling for Go and the command line
 
-> **Fork note (hajekt2/pdfcpu, branch `uacheck/discard-log`).** This fork of
-> [pdfcpu](https://github.com/pdfcpu/pdfcpu) v0.16.2 carries one small, opt-in
-> patch for the [uacheck](https://github.com/hajekt2/uacheck) PDF accessibility
+> **Fork note (hajekt2/pdfcpu, branches `uacheck/discard-log` and `uacheck/no-repair`).** This fork of
+> [pdfcpu](https://github.com/pdfcpu/pdfcpu) v0.16.2 carries opt-in reader extensions
+> for the [uacheck](https://github.com/hajekt2/uacheck) PDF accessibility
 > checker. When `Configuration.RecordDiscardedTokens` is set, the reader records
 > each token its relaxed parser replaces instead of rejecting: an invalid hex
 > string or an unparseable bare token read as null, or an out-of-range integer
@@ -14,7 +14,19 @@
 > saturated. Parsed objects are identical
 > with recording on or off, and recording is off by default. Changed files carry a modification notice; the
 > licence is unchanged (Apache-2.0, see LICENSE.txt). The fork is retired if
-> upstream pdfcpu accepts an equivalent hook.
+> upstream pdfcpu accepts equivalent reader hooks.
+>
+> `Configuration.NoRepair` defaults to false. When true, the reader refuses
+> recovery except for recorded object-0 free-list-head synthesis, head generation
+> normalization and lowering an oversized xref `/Size` without changing selected
+> objects. Other recovery returns `*model.RepairRefusedError`, containing
+> a closed site code and numeric locations only. The policy remains active in lazy object-stream and
+> filter decoding after Read returns. Callers must check those later errors
+> before issuing a read certificate. `ctx.NoRepairNormalizations()` returns a
+> read-only snapshot of the permitted normalization facts, including declared and
+> effective sizes. See
+> [NOREPAIR.md](NOREPAIR.md) for the complete read-path inventory,
+> normal-decoding classifications and tests.
 
 [![Test](https://github.com/pdfcpu/pdfcpu/workflows/Test/badge.svg)](https://github.com/pdfcpu/pdfcpu/actions)
 [![Coverage Status](https://coveralls.io/repos/github/pdfcpu/pdfcpu/badge.svg?branch=master)](https://coveralls.io/github/pdfcpu/pdfcpu?branch=master)

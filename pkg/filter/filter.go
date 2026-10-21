@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 // Package filter contains PDF filter implementations.
 package filter
 
@@ -69,28 +71,34 @@ func NewFilter(filterName string, parms map[string]int, maxDecodeBytes ...int64)
 	if len(maxDecodeBytes) > 0 {
 		limit = maxDecodeBytes[0]
 	}
+	return NewFilterWithRepairError(filterName, parms, limit, nil)
+}
+
+// NewFilterWithRepairError preserves ordinary decoding but returns repairError
+// before accepting a truncated encoded stream. A nil error keeps legacy behavior.
+func NewFilterWithRepairError(filterName string, parms map[string]int, limit int64, repairError error) (filter Filter, err error) {
 	switch filterName {
 
 	case ASCII85:
-		filter = ascii85Decode{baseFilter{maxDecodeBytes: limit}}
+		filter = ascii85Decode{baseFilter{maxDecodeBytes: limit, repairError: repairError}}
 
 	case ASCIIHex:
-		filter = asciiHexDecode{baseFilter{maxDecodeBytes: limit}}
+		filter = asciiHexDecode{baseFilter{maxDecodeBytes: limit, repairError: repairError}}
 
 	case RunLength:
-		filter = runLengthDecode{baseFilter{parms: parms, maxDecodeBytes: limit}}
+		filter = runLengthDecode{baseFilter{parms: parms, maxDecodeBytes: limit, repairError: repairError}}
 
 	case LZW:
-		filter = lzwDecode{baseFilter{parms: parms, maxDecodeBytes: limit}}
+		filter = lzwDecode{baseFilter{parms: parms, maxDecodeBytes: limit, repairError: repairError}}
 
 	case Flate:
-		filter = flate{baseFilter{parms: parms, maxDecodeBytes: limit}}
+		filter = flate{baseFilter{parms: parms, maxDecodeBytes: limit, repairError: repairError}}
 
 	case CCITTFax:
-		filter = ccittDecode{baseFilter{parms: parms, maxDecodeBytes: limit}}
+		filter = ccittDecode{baseFilter{parms: parms, maxDecodeBytes: limit, repairError: repairError}}
 
 	case DCT:
-		filter = dctDecode{baseFilter{parms: parms, maxDecodeBytes: limit}}
+		filter = dctDecode{baseFilter{parms: parms, maxDecodeBytes: limit, repairError: repairError}}
 
 	case JBIG2:
 		// Unsupported
@@ -117,6 +125,7 @@ func List() []string {
 }
 
 type baseFilter struct {
+	repairError    error
 	parms          map[string]int
 	maxDecodeBytes int64
 }

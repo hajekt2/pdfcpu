@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package filter
 
 import (
@@ -71,6 +73,9 @@ func (f runLengthDecode) decode(w io.ByteWriter, src []byte, maxLen int64) error
 			written++
 		}
 		i++
+	}
+	if f.repairError != nil && (maxLen < 0 || written < maxLen) {
+		return f.repairError
 	}
 	return nil
 }

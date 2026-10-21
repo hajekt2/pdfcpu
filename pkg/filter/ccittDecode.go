@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package filter
 
 import (
@@ -22,6 +24,7 @@ import (
 	"io"
 
 	"github.com/pdfcpu/pdfcpu/pkg/log"
+	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/safemath"
 	"golang.org/x/image/ccitt"
 )
 
@@ -90,10 +93,36 @@ func (f ccittDecode) DecodeLength(r io.Reader, maxLen int64) (io.Reader, error) 
 	if k < 0 {
 		mode = ccitt.Group4
 	}
+	if f.repairError != nil {
+		endOfBlock, declared := f.parms["EndOfBlock"]
+		if !declared || endOfBlock != 0 {
+			// EndOfBlock overrides Rows (ISO 32000-1 Table 11). Unknown
+			// height also disables x/image's missing-trailer tolerance.
+			rows = ccitt.AutoDetectHeight
+		} else if rows > 0 {
+			// A declared row count with EndOfBlock=false needs no trailer.
+			rowBytes := int64(cols/8) + int64((cols%8+7)/8)
+			length, err := safemath.MultiplyInt64(rowBytes, int64(rows))
+			if err != nil {
+				return nil, ErrDecodeLimitExceeded
+			}
+			if maxLen < 0 {
+				if limit := f.decodeLimit(-1); limit >= 0 && length > limit {
+					return nil, ErrDecodeLimitExceeded
+				}
+				maxLen = length
+			} else if maxLen > length {
+				return nil, io.ErrUnexpectedEOF
+			}
+		}
+	}
 	rd := ccitt.NewReader(r, ccitt.MSB, mode, cols, rows, opts)
 
 	b, err := f.copyDecoded(rd, maxLen)
 	if err != nil {
+		if f.repairError != nil && !errors.Is(err, ErrDecodeLimitExceeded) {
+			return nil, f.repairError
+		}
 		return nil, err
 	}
 

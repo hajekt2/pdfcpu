@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 // Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
 // recording of tokens the relaxed parser replaces. See README.md, "Fork note".
 
@@ -183,6 +185,7 @@ func Read(c context.Context, rs io.ReadSeeker, conf *model.Configuration) (*mode
 	if ctx.Read.FileSize == 0 {
 		return nil, ErrEmptyInput
 	}
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), -1, -1)
 	// Share one parsing budget across xref construction and object loading.
 	c = context.WithValue(c, objectReadBudgetKey{}, &objectReadBudgetState{limit: objectReadBudgetLimit(ctx)})
 	// Share active-object tracking across nested reads.
@@ -208,9 +211,8 @@ func Read(c context.Context, rs io.ReadSeeker, conf *model.Configuration) (*mode
 	}
 
 	// Some PDFWriters write an incorrect Size into trailer.
-	if ctx.XRefTable.Size == nil || *ctx.XRefTable.Size != ctx.MaxObjNr+1 {
-		maxObjNr := ctx.MaxObjNr + 1
-		ctx.XRefTable.Size = &maxObjNr
+	if err := ctx.XRefTable.NormalizeReadXRefSize(ctx.MaxObjNr + 1); err != nil {
+		return nil, err
 	}
 
 	if log.ReadEnabled() {
@@ -307,6 +309,9 @@ func offsetLastXRefSection(ctx *model.Context, skip int64) (*int64, error) {
 		}
 
 		start := j + len("startxref")
+		if ctx.XRefTable.RepairsForbidden() && start < len(workBuf) && !pdfSpace(workBuf[start]) {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, off+int64(start))
+		}
 		if start >= len(workBuf) {
 			return nil, errMissingXRefEOF
 		}
@@ -314,20 +319,44 @@ func offsetLastXRefSection(ctx *model.Context, skip int64) (*int64, error) {
 		p := workBuf[start+1:]
 		posEOF := strings.Index(string(p), "%%EOF")
 		if posEOF < 0 {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, off+int64(start)); err != nil {
+				return nil, err
+			}
 			posEOF = incrEpilogIndex(string(p))
 			if posEOF < 0 {
 				return nil, errMissingXRefEOF
 			}
 		}
 
+		if ctx.XRefTable.RepairsForbidden() && skip == 0 && start+1+posEOF+len("%%EOF") <= len(workBuf) {
+			tail := workBuf[start+1+posEOF+len("%%EOF"):]
+			if len(bytes.Trim(tail, "\x00\t\n\f\r ")) > 0 {
+				if err := ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, off+int64(start+1+posEOF)); err != nil {
+					return nil, err
+				}
+
+			}
+		}
 		p = p[:posEOF]
-		s := strings.TrimSpace(string(p))
-		s = strings.TrimSpace(strings.TrimRight(s, "%"))
+		s := trimReadSpace(string(p), ctx.XRefTable.RepairsForbidden())
+		if ctx.XRefTable.RepairsForbidden() && strings.TrimSpace(s) != s {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, off+int64(start))
+		}
+		if strings.HasSuffix(s, "%") {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, -1); err != nil {
+				return nil, err
+			}
+		}
+		s = trimReadSpace(strings.TrimRight(s, "%"), ctx.XRefTable.RepairsForbidden())
 		offset, err = strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			return nil, errInvalidLastXRefSection
 		}
 		if offset >= ctx.Read.FileSize {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, offset); err != nil {
+				return nil, err
+			}
+
 			offset = 0
 		}
 	}
@@ -417,11 +446,29 @@ func parseXRefTableEntry(xRefTable *model.XRefTable, fields []string, objNr int,
 		log.Read.Println("parseXRefTableEntry: begin")
 	}
 
+	if len(fields[1]) > 5 {
+		if err := xRefTable.RefuseRepair(model.RepairXRefGeneration, objNr, -1); err != nil {
+			return err
+		}
+
+	}
+	if len(fields[0]) != 10 || len(fields[1]) != 5 || strings.IndexFunc(fields[0]+fields[1], func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+		if err := xRefTable.RefuseRepair(model.RepairXRefEntry, objNr, -1); err != nil {
+			return err
+		}
+
+	}
 	offset, generation, entryType, err := decodeSubsection(fields)
 	if err != nil {
 		return err
 	}
 
+	if entryType == "n" && (objNr == 0 || offset < 9) {
+		if err := xRefTable.RefuseRepair(model.RepairXRefEntry, objNr, offset); err != nil {
+			return err
+		}
+
+	}
 	if entryType == "n" && objNr > 0 && offset == 0 {
 		err := model.WithValidationErrorObject(errors.New("in-use xref entry has offset 0"), objNr)
 		if xRefTable.ValidationMode == model.ValidationStrict {
@@ -507,7 +554,7 @@ func parseXRefTableSubSection(xRefTable *model.XRefTable, limits model.ResourceL
 				return "", err
 			}
 
-			fields = strings.Fields(line)
+			fields = readFields(line, xRefTable.RepairsForbidden())
 			if len(fields) != 3 {
 				if i < objCount {
 					return "", errIncompleteXRefSubsection
@@ -531,10 +578,17 @@ func parseXRefTableSubSection(xRefTable *model.XRefTable, limits model.ResourceL
 			}
 
 			if len(fields[0]) == 1 { // should be 10
+				if err := xRefTable.RefuseRepair(model.RepairXRefEntry, objNr, -1); err != nil {
+					return "", err
+				}
+
 				continue
 			}
 
 			if i >= objCount {
+				if err := xRefTable.RefuseRepair(model.RepairXRefEntry, objNr, -1); err != nil {
+					return "", err
+				}
 				model.ShowMsg(fmt.Sprintf("digesting extra XrefTable entry for obj#%d", objNr))
 			}
 			if err = parseXRefTableEntry(xRefTable, fields, objNr, offExtra, incr); err != nil {
@@ -555,6 +609,9 @@ func compressedObject(c context.Context, s string, validationMode int) (types.Ob
 	result, err := model.ParseObjectWithPolicy(c, &s, 0, validationMode)
 	if err != nil {
 		return nil, err
+	}
+	if model.RepairsForbidden(c) && trimPDFSpaceAndComments(s) != "" {
+		return nil, model.RefuseRepair(c, model.RepairParserToken)
 	}
 	o := result.Object
 
@@ -582,6 +639,8 @@ func compressedObject(c context.Context, s string, validationMode int) (types.Ob
 func buildObjectArrayForObjectStream(c context.Context, osd *types.ObjectStreamDict, objs []string, fullContent bool, decodedContent []byte, decode types.DecodeLazyObjectStreamObjectFunc) (types.Array, error) {
 	var objArray types.Array
 	var offsetOld int
+	noRepair := model.RepairsForbidden(c)
+	objectNumbers := types.IntSet{}
 
 	for i := 0; i < len(objs); i += 2 {
 
@@ -589,6 +648,14 @@ func buildObjectArrayForObjectStream(c context.Context, osd *types.ObjectStreamD
 			return nil, err
 		}
 
+		if noRepair {
+			object, err := strconv.Atoi(objs[i])
+			if err != nil || object <= 0 || objectNumbers[object] {
+				return nil, model.RefuseRepair(c, model.RepairObjectStreamIndex)
+			}
+			objectNumbers[object] = true
+			osd.ObjectNumbers = append(osd.ObjectNumbers, object)
+		}
 		offset, err := strconv.Atoi(objs[i+1])
 		if err != nil {
 			return nil, fmt.Errorf("object stream dict offset %d: %w", i/2, err)
@@ -606,12 +673,22 @@ func buildObjectArrayForObjectStream(c context.Context, osd *types.ObjectStreamD
 		}
 
 		if i > 0 {
-			o := types.NewLazyObjectStreamObject(osd, offsetOld, offset, decode)
+			object, _ := strconv.Atoi(objs[i-2])
+			memberDecode := func(c context.Context, s string) (types.Object, error) {
+				c = model.WithRepairScope(c, noRepair, object, -1)
+				return decode(c, s)
+			}
+			o := types.NewLazyObjectStreamObject(osd, offsetOld, offset, memberDecode)
 			objArray = append(objArray, o)
 		}
 
 		if i == len(objs)-2 {
-			o := types.NewLazyObjectStreamObject(osd, offset, -1, decode)
+			object, _ := strconv.Atoi(objs[i])
+			memberDecode := func(c context.Context, s string) (types.Object, error) {
+				c = model.WithRepairScope(c, noRepair, object, -1)
+				return decode(c, s)
+			}
+			o := types.NewLazyObjectStreamObject(osd, offset, -1, memberDecode)
 			objArray = append(objArray, o)
 		}
 
@@ -642,17 +719,21 @@ func parseObjectStream(c context.Context, osd *types.ObjectStreamDict, limits mo
 	}
 	prolog := decodedContent[:osd.FirstObjOffset]
 
-	// Remove inline comment.
-	if i := bytes.Index(prolog, []byte("%")); i != -1 {
-		prolog = prolog[:i]
+	var objs []string
+	if model.RepairsForbidden(c) {
+		objs = pdfFieldsAndComments(string(prolog))
+	} else {
+		// Preserve legacy comment truncation and NUL handling.
+		if i := bytes.Index(prolog, []byte("%")); i != -1 {
+			prolog = prolog[:i]
+		}
+		prolog = bytes.ReplaceAll(prolog, []byte{0x00}, []byte{0x20})
+		objs = strings.Fields(string(prolog))
 	}
-
-	// The separator used in the prolog shall be white space
-	// but some PDF writers use 0x00.
-	prolog = bytes.ReplaceAll(prolog, []byte{0x00}, []byte{0x20})
-
-	objs := strings.Fields(string(prolog))
 	if len(objs)%2 > 0 {
+		if err := model.RefuseRepair(c, model.RepairObjectStreamIndex); err != nil {
+			return err
+		}
 		return errCorruptObjectStreamDict
 	}
 	entryCount := len(objs) / 2
@@ -665,6 +746,9 @@ func parseObjectStream(c context.Context, osd *types.ObjectStreamDict, limits mo
 		)
 	}
 	if entryCount != osd.ObjCount {
+		if err := model.RefuseRepair(c, model.RepairObjectStreamIndex); err != nil {
+			return err
+		}
 		return fmt.Errorf(
 			"object stream index contains %d entries, expected %d: %w",
 			entryCount,
@@ -755,7 +839,7 @@ func createXRefTableEntryFromXRefStream(entryType int64, objNr int, c2, c3, offE
 		}
 		var next int64
 		var g int
-		xRefTableEntry = model.XRefTableEntry{Free: true, Offset: &next, Generation: &g, Incr: incr}
+		xRefTableEntry = model.XRefTableEntry{Free: true, Null: true, Offset: &next, Generation: &g, Incr: incr}
 	}
 
 	return xRefTableEntry
@@ -809,6 +893,12 @@ func extractXRefTableEntriesFromXRefStream(buf []byte, offExtra int64, xsd *type
 			len(buf), len(buf)/xrefEntryLen,
 		)
 	}
+	if objCount < len(buf)/xrefEntryLen {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairXRefEntry, -1, -1); err != nil {
+			return err
+		}
+
+	}
 	if objCount > len(buf)/xrefEntryLen {
 		// Sometimes there is an additional xref entry not accounted for by "Index".
 		// We ignore such entries and do not treat this as an error.
@@ -849,6 +939,11 @@ func extractXRefTableEntriesFromXRefStream(buf []byte, offExtra int64, xsd *type
 		c2 := bufToInt64(buf[i+i1 : i+i1+i2])
 		c3 := bufToInt64(buf[i+i1+i2 : i+i1+i2+i3])
 
+		if c1 == 1 && (objNr == 0 || c2 < 9) {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairXRefEntry, objNr, c2); err != nil {
+				return err
+			}
+		}
 		entry := createXRefTableEntryFromXRefStream(c1, objNr, c2, c3, offExtra, ctx.Read.ObjectStreams, incr)
 		ctx.Table[objNr] = &entry
 		j++
@@ -879,6 +974,7 @@ func validateXRefStreamDirectEntries(d types.Dict, objNr int) error {
 }
 
 func xRefStreamDict(c context.Context, ctx *model.Context, o types.Object, objNr int, streamOffset int64) (*types.XRefStreamDict, error) {
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), objNr, streamOffset)
 	d, ok := o.(types.Dict)
 	if !ok {
 		return nil, fmt.Errorf("xref stream obj#%d: %w", objNr, errMissingXRefStreamDict)
@@ -903,6 +999,7 @@ func xRefStreamDict(c context.Context, ctx *model.Context, o types.Object, objNr
 		log.Read.Printf("xRefStreamDict: streamobject #%d\n", objNr)
 	}
 	sd := types.NewStreamDict(d, streamOffset, streamLength, streamLengthObjNr, filterPipeline)
+	sd.SetReadRepairError(ctx.XRefTable.RefuseRepair(model.RepairFilterData, objNr, streamOffset))
 
 	if err = loadEncodedStreamContent(c, ctx, &sd, false); err != nil {
 		return nil, err
@@ -915,7 +1012,12 @@ func xRefStreamDict(c context.Context, ctx *model.Context, o types.Object, objNr
 
 	declaredSize := sd.Size()
 	var xsd *types.XRefStreamDict
-	if ctx.Configuration.ValidationMode == model.ValidationRelaxed {
+	if ctx.XRefTable.RepairsForbidden() {
+		xsd, err = model.ParseXRefStreamDictWithLimits(&sd, ctx.Configuration.Limits)
+		if errors.Is(err, model.ErrXRefStreamIndexSizeMismatch) || (declaredSize != nil && *declaredSize <= 0 && sd.Index() != nil) {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairXRefSize, objNr, streamOffset)
+		}
+	} else if ctx.Configuration.ValidationMode == model.ValidationRelaxed {
 		xsd, err = model.ParseXRefStreamDictRelaxedWithLimits(&sd, ctx.Configuration.Limits)
 	} else {
 		xsd, err = model.ParseXRefStreamDictWithLimits(&sd, ctx.Configuration.Limits)
@@ -985,7 +1087,7 @@ func parseXRefStream(c context.Context, ctx *model.Context, rd io.Reader, offset
 	// Init object parse buf.
 	l := line[:streamInd]
 
-	objNr, genNr, err := model.ParseObjectAttributes(&l)
+	objNr, genNr, err := readObjectAttributes(c, &l)
 	if err != nil {
 		return nil, err
 	}
@@ -1058,6 +1160,9 @@ func parseTrailerSize(xRefTable *model.XRefTable, d types.Dict) error {
 		err = fmt.Errorf("trailer Size %d exceeds limit %d: %w", v, limit, errCorruptTrailerDict)
 	}
 	if err != nil {
+		if err := xRefTable.RefuseRepair(model.RepairXRefSize, 0, -1); err != nil {
+			return err
+		}
 		if xRefTable.ValidationMode == model.ValidationStrict {
 			return err
 		}
@@ -1162,6 +1267,9 @@ func parseTrailerID(xRefTable *model.XRefTable, d types.Dict) error {
 			}
 			if len(arr) != 1 {
 				return errInvalidTrailerID
+			}
+			if err := xRefTable.RefuseRepair(model.RepairTrailerID, 0, -1); err != nil {
+				return err
 			}
 			arr = append(arr, arr[0])
 			model.ShowRepaired("trailer ID")
@@ -1327,6 +1435,9 @@ func offsetPrev(ctx *model.Context, trailerDict types.Dict, offCurXRef *int64) (
 			log.Read.Printf("offsetPrev: previous xref table section offset:%d\n", *offset)
 		}
 		if *offset == 0 {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairXRefReconstruction, 0, -1); err != nil {
+				return nil, err
+			}
 			offset = nil
 			if offCurXRef != nil {
 				if off := scanForPreviousXref(ctx, offCurXRef); off != nil {
@@ -1434,10 +1545,20 @@ func scanLine(s *bufio.Scanner) (s1 string, err error) {
 	return s1, nil
 }
 
-func scanTrailerDictStart(s *bufio.Scanner, line *string) error {
+func scanTrailerDictStart(c context.Context, s *bufio.Scanner, line *string) error {
 	l := *line
 	var err error
 	for {
+		if model.RepairsForbidden(c) {
+			l = trimPDFSpaceAndComments(l)
+			if strings.HasPrefix(l, "<<") {
+				*line = l
+				return nil
+			}
+			if l != "" {
+				return model.RefuseRepair(c, model.RepairParserToken)
+			}
+		}
 		i := strings.Index(l, "<<")
 		if i >= 0 {
 			*line = l[i:]
@@ -1481,14 +1602,17 @@ func scanTrailerDictRemainder(s *bufio.Scanner, line string, buf bytes.Buffer) (
 	return buf.String(), nil
 }
 
-func scanTrailer(s *bufio.Scanner, line string) (string, error) {
+func scanTrailer(c context.Context, ctx *model.Context, s *bufio.Scanner, line string) (string, error) {
 	var buf bytes.Buffer
 	if log.ReadEnabled() {
 		log.Read.Printf("line: <%s>\n", line)
 	}
 
-	if err := scanTrailerDictStart(s, &line); err != nil {
+	if err := scanTrailerDictStart(c, s, &line); err != nil {
 		return "", err
+	}
+	if ctx.XRefTable.RepairsForbidden() {
+		return scanTrailerWithoutRepair(c, ctx, s, line)
 	}
 
 	return scanTrailerDictRemainder(s, line, buf)
@@ -1508,7 +1632,8 @@ func processTrailer(c context.Context, ctx *model.Context, s *bufio.Scanner, lin
 		}
 	}
 
-	trailerString, err := scanTrailer(s, trailerString)
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), 0, -1)
+	trailerString, err := scanTrailer(c, ctx, s, trailerString)
 	if err != nil {
 		return nil, err
 	}
@@ -1557,10 +1682,13 @@ func parseXRefSection(c context.Context, ctx *model.Context, s *bufio.Scanner, f
 			log.Read.Printf("parseXRefSection: <%s>\n", line)
 		}
 
-		fields = strings.Fields(line)
+		fields = readFields(line, ctx.XRefTable.RepairsForbidden())
 	}
 
 	line = strings.TrimLeft(line, " ")
+	if ctx.XRefTable.RepairsForbidden() {
+		line = trimPDFSpace(line)
+	}
 	if !strings.HasPrefix(line, "trailer") {
 		// Process all sub sections of this xRef section.
 		if line, err = parseXRefTableSubSection(ctx.XRefTable, ctx.Configuration.Limits, s, fields, offExtra, incr); err != nil {
@@ -1568,6 +1696,9 @@ func parseXRefSection(c context.Context, ctx *model.Context, s *bufio.Scanner, f
 		}
 		*ssCount++
 		line = strings.TrimLeft(line, " ")
+		if ctx.XRefTable.RepairsForbidden() {
+			line = trimPDFSpace(line)
+		}
 	}
 
 	if log.ReadEnabled() {
@@ -1694,7 +1825,7 @@ func headerVersion(rs io.ReadSeeker) (v *model.Version, eolCount int, offset int
 
 func parseAndLoad(c context.Context, ctx *model.Context, line string, offset *int64, incr int, offsetPrev *int64) (int, error) {
 	l := line
-	objNr, generation, err := model.ParseObjectAttributes(&l)
+	objNr, generation, err := readObjectAttributes(c, &l)
 	if err != nil {
 		return 0, err
 	}
@@ -1931,6 +2062,12 @@ func discardPreEncryptionObjects(ctx *model.Context) {
 // It populates the xRefTable by reading in all indirect objects line by line
 // and works on the assumption of a single xref section - meaning no incremental updates.
 func bypassXrefSection(c context.Context, ctx *model.Context, offExtra int64, wasErr error, incr int) error {
+	if model.IsRepairRefused(wasErr) {
+		return wasErr
+	}
+	if err := ctx.XRefTable.RefuseRepair(model.RepairXRefReconstruction, -1, -1); err != nil {
+		return err
+	}
 	ctx.Table = make(map[int]*model.XRefTableEntry)
 
 	var z int64
@@ -2004,13 +2141,16 @@ func bypassXrefSection(c context.Context, ctx *model.Context, offExtra int64, wa
 	return nil
 }
 
-func postProcess(ctx *model.Context, xrefSectionCount int) {
+func postProcess(ctx *model.Context, xrefSectionCount int) error {
 	// Ensure free object #0 if exactly one xref subsection
 	// and in one of the following weird situations:
 	if xrefSectionCount == 1 && !ctx.Exists(0) {
 		// Fix for #250
 		e := ctx.Table[1]
 		if e != nil && e.Free {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairFreeHead, 0, -1); err != nil {
+				return err
+			}
 			// Create free object 0 by shifting down parsed objects by one.
 			for _, objNr := range slices.Sorted(maps.Keys(ctx.Table)) {
 				if objNr == 0 {
@@ -2023,12 +2163,17 @@ func postProcess(ctx *model.Context, xrefSectionCount int) {
 				}
 			}
 		} else {
+			if ctx.XRefTable.RepairsForbidden() {
+				// EnsureValidFreeList synthesizes and records the missing head.
+				return nil
+			}
 			// Create free object 0 from scratch if the free list head is missing.
 			g0 := types.FreeHeadGeneration
 			ctx.Table[0] = &model.XRefTableEntry{Free: true, Offset: &zero, Generation: &g0}
 		}
 		model.ShowRepaired("obj#0")
 	}
+	return nil
 }
 
 func tryXRefSection(c context.Context, ctx *model.Context, rs io.ReadSeeker, offset *int64, offExtra int64, xrefSectionCount *int, incr int) (*int64, error) {
@@ -2037,6 +2182,15 @@ func tryXRefSection(c context.Context, ctx *model.Context, rs io.ReadSeeker, off
 		return nil, err
 	}
 
+	if ctx.XRefTable.RepairsForbidden() {
+		p, err := rd.Peek(1)
+		if err != nil {
+			return nil, err
+		}
+		if pdfSpace(p[0]) {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairXRefShift, -1, *offset)
+		}
+	}
 	s := bufio.NewScanner(rd)
 	buf := make([]byte, 0, 4096)
 	s.Buffer(buf, 1024*1024)
@@ -2051,7 +2205,15 @@ func tryXRefSection(c context.Context, ctx *model.Context, rs io.ReadSeeker, off
 	}
 	repairOff := len(line)
 
-	if strings.TrimSpace(line) == "xref" {
+	if ctx.XRefTable.RepairsForbidden() && strings.TrimSpace(line) == "xref" {
+		if !strings.HasPrefix(line, "xref") {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairXRefShift, -1, *offset)
+		}
+		if trimReadSpace(line, true) != "xref" {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairXRefEntry, -1, *offset)
+		}
+	}
+	if trimReadSpace(line, ctx.XRefTable.RepairsForbidden()) == "xref" {
 		if log.ReadEnabled() {
 			log.Read.Println("tryXRefSection: found xref section")
 		}
@@ -2062,6 +2224,9 @@ func tryXRefSection(c context.Context, ctx *model.Context, rs io.ReadSeeker, off
 	if strings.HasPrefix(line, "xref") {
 		fields := strings.Fields(line)
 		if len(fields) == 3 {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairXRefSameLine, -1, *offset); err != nil {
+				return nil, err
+			}
 			return parseXRefSection(c, ctx, s, fields[1:], xrefSectionCount, offset, offExtra, incr)
 		}
 	}
@@ -2082,6 +2247,9 @@ func tryXRefSection(c context.Context, ctx *model.Context, rs io.ReadSeeker, off
 		repairOff += i
 		if log.ReadEnabled() {
 			log.Read.Printf("Repair offset: %d\n", repairOff)
+		}
+		if err := ctx.XRefTable.RefuseRepair(model.RepairXRefShift, -1, *offset); err != nil {
+			return nil, err
 		}
 		ctx.Read.RepairOffset = int64(repairOff)
 		return parseXRefSection(c, ctx, s, nil, xrefSectionCount, offset, offExtra, incr)
@@ -2130,6 +2298,11 @@ func buildXRefTableStartingAt(c context.Context, ctx *model.Context, offset *int
 	if err != nil {
 		return err
 	}
+	if offExtra != 0 {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairHeader, -1, offExtra); err != nil {
+			return err
+		}
+	}
 	*offset += offExtra
 
 	ctx.HeaderVersion = hv
@@ -2148,6 +2321,9 @@ func buildXRefTableStartingAt(c context.Context, ctx *model.Context, offset *int
 		}
 
 		if offs[*offset] {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairXRefCycle, -1, *offset); err != nil {
+				return err
+			}
 			if offset, err = offsetLastXRefSection(ctx, ctx.Read.FileSize-*offset); err != nil {
 				return err
 			}
@@ -2178,7 +2354,9 @@ func buildXRefTableStartingAt(c context.Context, ctx *model.Context, offset *int
 		}
 	}
 
-	postProcess(ctx, xrefSectionCount)
+	if err := postProcess(ctx, xrefSectionCount); err != nil {
+		return err
+	}
 
 	if log.ReadEnabled() {
 		log.Read.Println("buildXRefTableStartingAt: end")
@@ -2200,6 +2378,9 @@ func readXRefTable(c context.Context, ctx *model.Context) (err error) {
 	offset, err := offsetLastXRefSection(ctx, 0)
 	if err != nil {
 		if !repairableLastXRefSection(ctx, err) {
+			return err
+		}
+		if err := ctx.XRefTable.RefuseRepair(model.RepairXRefReconstruction, -1, -1); err != nil {
 			return err
 		}
 		zero := int64(0)
@@ -2391,7 +2572,7 @@ func buffer(c context.Context, rd io.Reader, maxObjectBytes int64) (buf []byte, 
 
 		// For very rare cases where "stream" also occurs within obj dict
 		// we need to find the last "stream" marker before a possible end marker.
-		for streamInd > 0 && !keywordStreamRightAfterEndOfDict(line, streamInd) {
+		for streamInd > 0 && !keywordStreamRightAfterEndOfDict(line, streamInd, model.RepairsForbidden(c)) {
 			lastStreamMarker(&streamInd, endInd, line)
 		}
 
@@ -2400,6 +2581,9 @@ func buffer(c context.Context, rd io.Reader, maxObjectBytes int64) (buf []byte, 
 		}
 
 		if streamInd > 0 {
+			if model.RepairsForbidden(c) && streamInd+6 < len(line) && line[streamInd+6] != '\r' && line[streamInd+6] != '\n' {
+				return nil, 0, 0, 0, model.RefuseRepair(c, model.RepairStreamMarker)
+			}
 
 			// streamOffset ... the offset where the actual stream data begins.
 			//                  is right after the eol after "stream".
@@ -2416,7 +2600,7 @@ func buffer(c context.Context, rd io.Reader, maxObjectBytes int64) (buf []byte, 
 }
 
 // return true if 'stream' follows end of dict: >>{whitespace}stream
-func keywordStreamRightAfterEndOfDict(buf string, streamInd int) bool {
+func keywordStreamRightAfterEndOfDict(buf string, streamInd int, noRepair bool) bool {
 	//log.Read.Println("keywordStreamRightAfterEndOfDict: begin")
 
 	// Get a slice of the chunk right in front of 'stream'.
@@ -2430,6 +2614,9 @@ func keywordStreamRightAfterEndOfDict(buf string, streamInd int) bool {
 	}
 
 	// We found the last >>. Return true if after end of dict only whitespace.
+	if noRepair {
+		return trimPDFSpaceAndComments(b[eod+2:]) == ""
+	}
 	ok := strings.TrimSpace(b[eod:]) == ">>"
 
 	//log.Read.Printf("keywordStreamRightAfterEndOfDict: end, %v\n", ok)
@@ -2566,6 +2753,9 @@ func singleFilter(c context.Context, ctx *model.Context, filterName string, d ty
 	}
 
 	if arr, ok := obj.(types.Array); ok {
+		if err := model.RefuseRepair(c, model.RepairFilterPipeline); err != nil {
+			return nil, err
+		}
 		if len(arr) > 1 {
 			return nil, fmt.Errorf("single filter %s DecodeParms: %w", filterName, errCorruptDecodeParms)
 		}
@@ -2602,6 +2792,11 @@ func pdfFilterPipeline(c context.Context, ctx *model.Context, dict types.Dict) (
 	}
 
 	var err error
+	if ctx.XRefTable.RepairsForbidden() && ctx.XRefTable.ValidationMode == model.ValidationRelaxed {
+		if err := refuseFilterAliases(c, ctx, dict); err != nil {
+			return nil, err
+		}
+	}
 
 	o, found := dict.Find("Filter")
 	if !found {
@@ -2644,6 +2839,11 @@ func pdfFilterPipeline(c context.Context, ctx *model.Context, dict types.Dict) (
 	if found {
 		if filterArraySupportsDecodeParms(ctx, names) {
 			decodeParmsArr, ok = decodeParms.(types.Array)
+			if !ok && decodeParms != nil {
+				if err := model.RefuseRepair(c, model.RepairFilterPipeline); err != nil {
+					return nil, err
+				}
+			}
 			if ok {
 				if len(decodeParmsArr) != len(filterArray) {
 					return nil, fmt.Errorf("filter pipeline DecodeParms: %w", errCorruptDecodeParms)
@@ -2681,6 +2881,7 @@ func streamDictForObject(c context.Context, ctx *model.Context, d types.Dict, ob
 
 	// We have a stream object.
 	sd = types.NewStreamDict(d, streamOffset, streamLength, streamLengthRef, filterPipeline)
+	sd.SetReadRepairError(ctx.XRefTable.RefuseRepair(model.RepairFilterData, objNr, offset))
 
 	if log.ReadEnabled() {
 		log.Read.Printf("streamDictForObject: end, Streamobject #%d\n", objNr)
@@ -2705,8 +2906,14 @@ func dict(c context.Context, ctx *model.Context, d1 types.Dict, objNr, genNr, en
 }
 
 func parseObjectWithValidationPolicy(c context.Context, ctx *model.Context, line *string, objNr int, offset int64) (types.Object, error) {
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), objNr, offset)
 	c = model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr, offset)
 	result, err := model.ParseObjectWithPolicy(c, line, 0, ctx.XRefTable.ValidationMode, recursionLimit(ctx))
+	if err == nil && ctx.XRefTable.RepairsForbidden() {
+		if trimPDFSpaceAndComments(*line) != "" {
+			return nil, model.RefuseRepair(c, model.RepairParserToken)
+		}
+	}
 	if result.StrictFailure == nil {
 		return result.Object, err
 	}
@@ -2853,11 +3060,15 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 
 	// Parse object number and object generation.
 	var objectNr, generationNr *int
-	if objectNr, generationNr, err = model.ParseObjectAttributes(&l); err != nil {
+	if objectNr, generationNr, err = readObjectAttributes(c, &l); err != nil {
 		return nil, 0, 0, 0, err
 	}
 
 	if objNr != *objectNr || genNr != *generationNr {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairObjectHeader, objNr, offset); err != nil {
+			return nil, 0, 0, 0, err
+		}
+
 		// This is suspicious, but ok if two object numbers point to same offset and only one of them is used
 		// (compare entry.RefCount) like for cases where the PDF Writer is MS Word 2013.
 		if log.ReadEnabled() {
@@ -2865,8 +3076,11 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		}
 	}
 
-	l = strings.TrimSpace(l)
+	l = trimReadSpace(l, ctx.XRefTable.RepairsForbidden())
 	if len(l) == 0 {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairObjectNull, objNr, offset); err != nil {
+			return nil, 0, 0, 0, err
+		}
 		// 7.3.9
 		// Specifying the null object as the value of a dictionary entry (7.3.7, "Dictionary Objects")
 		// shall be equivalent to omitting the entry entirely.
@@ -2909,6 +3123,7 @@ func ParseObject(c context.Context, ctx *model.Context, offset int64, objNr, gen
 	if log.ReadEnabled() {
 		log.Read.Printf("ParseObject: begin, obj#%d, offset:%d\n", objNr, offset)
 	}
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), objNr, offset)
 	inParse, ok := c.Value(objectParseKey{}).(types.IntSet)
 	if !ok {
 		inParse = types.IntSet{}
@@ -2927,6 +3142,9 @@ func ParseObject(c context.Context, ctx *model.Context, offset int64, objNr, gen
 	if err != nil {
 		if ctx.XRefTable.ValidationMode == model.ValidationRelaxed {
 			if errors.Is(err, io.EOF) {
+				if err := ctx.XRefTable.RefuseRepair(model.RepairObjectSkipped, objNr, offset); err != nil {
+					return nil, err
+				}
 				err = nil
 			}
 		}
@@ -3103,7 +3321,10 @@ func int64Object(c context.Context, ctx *model.Context, objNr int) (*int64, erro
 
 }
 
-func readStreamContentBlindly(rd io.Reader, maxStreamBytes int64) (buf []byte, err error) {
+func readStreamContentBlindly(rd io.Reader, maxStreamBytes int64, repairErrors ...error) (buf []byte, err error) {
+	if err := readRepairRefusal(repairErrors); err != nil {
+		return nil, err
+	}
 	// Weak heuristic for reading in stream data for cases where stream length is unknown.
 	// ...data...{eol}endstream{eol}endobj
 
@@ -3155,7 +3376,7 @@ func readStreamContentBlindly(rd io.Reader, maxStreamBytes int64) (buf []byte, e
 }
 
 // Reads and returns a file buffer with length = stream length using provided reader positioned at offset.
-func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]byte, error) {
+func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64, repairErrors ...error) ([]byte, error) {
 	if log.ReadEnabled() {
 		log.Read.Printf("readStreamContent: begin streamLength:%d\n", streamLength)
 	}
@@ -3163,7 +3384,7 @@ func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]
 	if streamLength <= 0 {
 		// Read until "endstream" then fix "Length", but do not allow
 		// unbounded memory growth for missing or corrupt markers.
-		return readStreamContentBlindly(rd, maxStreamBytes)
+		return readStreamContentBlindly(rd, maxStreamBytes, repairErrors...)
 	}
 
 	if int64(streamLength) > maxStreamBytes {
@@ -3201,6 +3422,9 @@ func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]
 			if eob < 0 {
 				return nil, err
 			}
+			if err := readRepairRefusal(repairErrors); err != nil {
+				return nil, err
+			}
 			return buf[:eob], nil
 		}
 
@@ -3216,13 +3440,16 @@ func readStreamContent(rd io.Reader, streamLength int, maxStreamBytes int64) ([]
 	return buf, nil
 }
 
-func ensureStreamLength(sd *types.StreamDict, fixLength bool) error {
+func ensureStreamLength(sd *types.StreamDict, fixLength bool, repairErrors ...error) error {
 	if sd == nil || sd.Dict == nil {
 		return errCorruptStreamDict
 	}
 
 	l := int64(len(sd.Raw))
 	if fixLength || sd.StreamLength == nil || l != *sd.StreamLength {
+		if err := readRepairRefusal(repairErrors); err != nil {
+			return err
+		}
 		sd.StreamLength = &l
 		sd.Dict["Length"] = types.Integer(l)
 	}
@@ -3256,6 +3483,9 @@ func ensureIndirectStreamLength(c context.Context, ctx *model.Context, sd *types
 		return nil
 	}
 	if sd.StreamLengthObjNr == nil {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairStreamLength, -1, sd.StreamOffset); err != nil {
+			return err
+		}
 		if ctx.XRefTable.ValidationMode == model.ValidationStrict {
 			return errMissingStreamLength
 		}
@@ -3267,6 +3497,11 @@ func ensureIndirectStreamLength(c context.Context, ctx *model.Context, sd *types
 	if err != nil && !errors.Is(err, ErrReferenceDoesNotExist) {
 		return err
 	}
+	if streamLength == nil {
+		if err := model.RefuseRepair(c, model.RepairStreamLength); err != nil {
+			return err
+		}
+	}
 	sd.StreamLength = streamLength
 
 	return nil
@@ -3276,6 +3511,11 @@ func ensureIndirectStreamLength(c context.Context, ctx *model.Context, sd *types
 func loadEncodedStreamContent(c context.Context, ctx *model.Context, sd *types.StreamDict, fixLength bool) error {
 	if sd.Raw != nil {
 		return nil
+	}
+	if fixLength {
+		if err := model.RefuseRepair(c, model.RepairStreamLength); err != nil {
+			return err
+		}
 	}
 
 	if log.ReadEnabled() {
@@ -3298,12 +3538,21 @@ func loadEncodedStreamContent(c context.Context, ctx *model.Context, sd *types.S
 	if !fixLength && sd.StreamLength != nil {
 		l1 = int(*sd.StreamLength)
 	}
-	sd.Raw, err = readStreamContent(rd, l1, streamLimit(ctx))
+	if ctx.XRefTable.RepairsForbidden() {
+		if err := checkSourceStreamExtent(c, ctx, sd, l1); err != nil {
+			return err
+		}
+	}
+	if ctx.XRefTable.RepairsForbidden() && l1 == 0 {
+		sd.Raw = []byte{}
+	} else {
+		sd.Raw, err = readStreamContent(rd, l1, streamLimit(ctx), ctx.XRefTable.RefuseRepair(model.RepairStreamLength, -1, sd.StreamOffset))
+	}
 	if err != nil {
 		return fmt.Errorf("read stream content: %w", err)
 	}
 
-	if err := ensureStreamLength(sd, fixLength); err != nil {
+	if err := ensureStreamLength(sd, fixLength, ctx.XRefTable.RefuseRepair(model.RepairStreamLength, -1, sd.StreamOffset)); err != nil {
 		return fmt.Errorf("stream length: %w", err)
 	}
 
@@ -3373,9 +3622,12 @@ func decryptStreamContent(ctx *model.Context, sd *types.StreamDict, objNr, genNr
 	if !encrypted {
 		return nil
 	}
-	raw, err := decryptStream(sd.Raw, objNr, genNr, ctx.EncKey, aes, ctx.E.R)
+	raw, err := decryptStream(sd.Raw, objNr, genNr, ctx.EncKey, aes, ctx.E.R, ctx.XRefTable.RefuseRepair(model.RepairEncryption, objNr, sd.StreamOffset))
 	if err != nil {
 		if repairablePlaintextMetadata(ctx, metadata, err) && validPlaintextMetadata(ctx, sd) {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairPlaintextMetadata, objNr, sd.StreamOffset); err != nil {
+				return err
+			}
 			model.ShowRepaired(fmt.Sprintf("plaintext metadata obj#%d", objNr))
 			return nil
 		}
@@ -3413,8 +3665,9 @@ func saveDecodedStreamContent(ctx *model.Context, sd *types.StreamDict, objNr, g
 		log.Read.Printf("saveDecodedStreamContent: begin decode=%t\n", decode)
 	}
 
-	// Special case: If the length of the encoded data is 0, we do not need to decode anything.
-	if len(sd.Raw) == 0 {
+	// Empty filtered data still needs its termination checked on a NoRepair
+	// decode. Caching it as decoded would bypass the deferred codec checks.
+	if len(sd.Raw) == 0 && (ctx == nil || !ctx.XRefTable.RepairsForbidden() || len(sd.FilterPipeline) == 0) {
 		sd.Content = sd.Raw
 		return nil
 	}
@@ -3478,6 +3731,12 @@ func decompressXRefTableEntry(xRefTable *model.XRefTable, objNr int, entry *mode
 	}
 
 	// Get indexed object from ObjectStreamDict.
+	if xRefTable.RepairsForbidden() {
+		i := *entry.ObjectStreamInd
+		if i < 0 || i >= len(sd.ObjectNumbers) || sd.ObjectNumbers[i] != objNr {
+			return xRefTable.RefuseRepair(model.RepairObjectStreamIndex, objNr, -1)
+		}
+	}
 	o, err := sd.IndexedObject(*entry.ObjectStreamInd)
 	if err != nil {
 		return fmt.Errorf("decompressXRefTableEntry: problem dereferencing object stream %d: %w", *entry.ObjectStream, err)
@@ -3554,6 +3813,7 @@ func decodeObjectStreamObjects(c context.Context, ctx *model.Context, sd *types.
 	}
 
 	// Parse all objects of this object stream and save them to ObjectStreamDict.ObjArray.
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), objNr, -1)
 	if err = parseObjectStream(c, osd, ctx.Configuration.Limits, ctx.XRefTable.ValidationMode); err != nil {
 		return nil, fmt.Errorf("object stream obj#%d: parse objects: %w", objNr, err)
 	}
@@ -3595,6 +3855,7 @@ func decodeObjectStream(c context.Context, ctx *model.Context, objNr int) error 
 		return fmt.Errorf("object stream obj#%d: %w", objNr, errCorruptObjectStream)
 	}
 
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), objNr, *entry.Offset)
 	// Load encoded stream content to xRefTable.
 	if err = loadEncodedStreamContent(c, ctx, &sd, false); err != nil {
 		return fmt.Errorf("object stream obj#%d: load encoded content: %w", objNr, err)
@@ -3786,6 +4047,7 @@ func handleLinearizationParmDict(ctx *model.Context, obj types.Object, objNr int
 }
 
 func loadStreamDict(c context.Context, ctx *model.Context, sd *types.StreamDict, objNr, genNr int, fixLength bool) error {
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), objNr, sd.StreamOffset)
 	// Load encoded stream content for stream dicts into xRefTable entry.
 	if err := loadEncodedStreamContent(c, ctx, sd, fixLength); err != nil {
 		return fmt.Errorf("stream obj#%d: load encoded content: %w", objNr, err)
@@ -3831,6 +4093,15 @@ func dereferenceAndLoad(c context.Context, ctx *model.Context, objNr int, entry 
 	// Parse object from ctx: anything goes dict, array, integer, float, streamdict...
 	o, err := ParseObject(c, ctx, *entry.Offset, objNr, *entry.Generation)
 	if err != nil {
+		if model.IsRepairRefused(err) {
+			return err
+		}
+		if ctx.XRefTable.RepairsForbidden() {
+			if errors.Is(err, model.ErrCorruptObjectOffset) {
+				return ctx.XRefTable.RefuseRepair(model.RepairXRefReconstruction, objNr, *entry.Offset)
+			}
+			return ctx.XRefTable.RefuseRepair(model.RepairObjectSkipped, objNr, *entry.Offset)
+		}
 		if ctx.XRefTable.ValidationMode == model.ValidationStrict {
 			return fmt.Errorf("dereferenceAndLoad: problem dereferencing object %d: %w", objNr, err)
 		}
@@ -4158,6 +4429,9 @@ func identifyRootVersion(xRefTable *model.XRefTable) error {
 	// Validate version and save corresponding constant to xRefTable.
 	rootVersion, err := model.PDFVersion(*rootVersionStr)
 	if err != nil {
+		if err := xRefTable.RefuseRepair(model.RepairRootVersion, -1, -1); err != nil {
+			return err
+		}
 		if xRefTable.ValidationMode == model.ValidationStrict {
 			return nil
 		}
@@ -4277,6 +4551,9 @@ func setupEncryptionKey(ctx *model.Context, d types.Dict) (err error) {
 	}
 
 	if len(ctx.ID) == 0 {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairTrailerID, 0, -1); err != nil {
+			return err
+		}
 		if ctx.XRefTable.ValidationMode == model.ValidationStrict {
 			return fmt.Errorf("read encryption ID: %w", errMissingTrailerID)
 		}

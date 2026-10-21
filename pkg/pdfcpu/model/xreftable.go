@@ -14,6 +14,8 @@
 	limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 // Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
 // recording of tokens the relaxed parser replaces. See README.md, "Fork note".
 
@@ -67,6 +69,7 @@ var zero int64 = 0
 // Array, Integer, Float, Name, StringLiteral, HexLiteral, Boolean
 type XRefTableEntry struct {
 	Free            bool
+	Null            bool // Unknown xref-stream type, resolves to null rather than a free-list member.
 	Offset          *int64
 	Generation      *int
 	Incr            int // TODO
@@ -190,13 +193,15 @@ type XRefTable struct {
 	CustomExtensions bool // File is using custom extensions for annotations and/or keywords.
 
 	// Validation
-	CurPage          int                       // current page during validation
-	Conf             *Configuration            // current command being executed
-	ValidationMode   int                       // see Configuration
-	ValidateLinks    bool                      // check and report external references.
-	Valid            bool                      // true means successful validated against ISO 32000.
-	URIs             map[int]map[string]string // URIs for link checking
-	validationReport *ValidationReport
+	CurPage                int                       // current page during validation
+	Conf                   *Configuration            // current command being executed
+	ValidationMode         int                       // see Configuration
+	ValidateLinks          bool                      // check and report external references.
+	Valid                  bool                      // true means successful validated against ISO 32000.
+	URIs                   map[int]map[string]string // URIs for link checking
+	validationReport       *ValidationReport
+	noRepair               bool // frozen read policy, also used by lazy source access
+	noRepairNormalizations NoRepairNormalizations
 
 	Optimized      bool
 	Watermarked    bool
@@ -219,6 +224,7 @@ func newXRefTable(conf *Configuration) (xRefTable *XRefTable) {
 	}
 	return &XRefTable{
 		Discards:          discards,
+		noRepair:          conf.NoRepair,
 		Table:             map[int]*XRefTableEntry{},
 		Names:             map[string]*Node{},
 		NameRefs:          map[string]NameMap{},
@@ -912,6 +918,11 @@ func (xRefTable *XRefTable) freeObjects() types.IntSet {
 
 	for k, v := range xRefTable.Table {
 		if v != nil && v.Free && k > 0 {
+			// Null placeholders are not source free entries. Preserve the legacy
+			// bookkeeping when repairs are enabled.
+			if v.Null && xRefTable.RepairsForbidden() {
+				continue
+			}
 			m[k] = true
 		}
 	}
@@ -942,10 +953,18 @@ func (xRefTable *XRefTable) handleDanglingFree(m types.IntSet, head *XRefTableEn
 		}
 
 		if *entry.Generation == types.FreeHeadGeneration {
+			if *entry.Offset != 0 {
+				if err := xRefTable.RefuseRepair(RepairFreeLink, i, -1); err != nil {
+					return err
+				}
+			}
 			entry.Offset = &zero
 			continue
 		}
 
+		if err := xRefTable.RefuseRepair(RepairFreeLink, i, -1); err != nil {
+			return err
+		}
 		entry.Offset = head.Offset
 		next := int64(i)
 		head.Offset = &next
@@ -963,6 +982,9 @@ func (xRefTable *XRefTable) validateFreeList(f int, m types.IntSet, e *XRefTable
 		}
 		// verify if obj f is one of the free objects recorded.
 		if !m[f] {
+			if err := xRefTable.RefuseRepair(RepairFreeLink, f, -1); err != nil {
+				return nil, 0, err
+			}
 			if len(m) > 0 && lastValid == nil {
 				lastValid = e
 				f = lowestKey(m)
@@ -1001,16 +1023,30 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 
 	// Verify free object 0 as free list head.
 	head, _ := xRefTable.Find(0)
-	if head == nil {
+	// An unknown-type null placeholder is not a source free head. Synthesize
+	// the permitted internal head and record that fact only under NoRepair.
+	if head == nil || (head.Null && xRefTable.RepairsForbidden()) {
 		g0 := types.FreeHeadGeneration
 		head = &XRefTableEntry{Free: true, Offset: &zero, Generation: &g0}
 		xRefTable.Table[0] = head
+		if xRefTable.RepairsForbidden() {
+			xRefTable.noRepairNormalizations.FreeListHeadSynthesized = true
+		}
 	}
 
-	// verify generation of 56535
+	// The allowance applies only to a free head, never an in-use object.
+	if !head.Free {
+		if err := xRefTable.RefuseRepair(RepairFreeHead, 0, -1); err != nil {
+			return err
+		}
+	}
+
+	// ISO 32000-1 7.5.4 reserves generation 65535 for object 0.
 	if *head.Generation != types.FreeHeadGeneration {
-		// Fix generation for obj 0.
 		*head.Generation = types.FreeHeadGeneration
+		if xRefTable.RepairsForbidden() {
+			xRefTable.noRepairNormalizations.FreeListHeadGenerationFixed = true
+		}
 	}
 
 	if len(m) == 0 {
@@ -1019,6 +1055,9 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 
 		// repair if necessary
 		if *head.Offset != 0 {
+			if err := xRefTable.RefuseRepair(RepairFreeLink, 0, -1); err != nil {
+				return err
+			}
 			*head.Offset = 0
 		}
 

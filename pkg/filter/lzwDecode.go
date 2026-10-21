@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package filter
 
 import (
@@ -78,7 +80,7 @@ func (f lzwDecode) DecodeLength(r io.Reader, maxLen int64) (io.Reader, error) {
 		ec = 1
 	}
 
-	rc := lzw.NewReader(r, ec == 1)
+	rc := lzw.NewReaderWithRepairError(r, ec == 1, f.repairError)
 	defer rc.Close()
 
 	b, err := f.copyDecoded(rc, maxLen)
