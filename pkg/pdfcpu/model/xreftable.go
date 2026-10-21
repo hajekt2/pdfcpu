@@ -192,14 +192,15 @@ type XRefTable struct {
 	CustomExtensions bool // File is using custom extensions for annotations and/or keywords.
 
 	// Validation
-	CurPage          int                       // current page during validation
-	Conf             *Configuration            // current command being executed
-	ValidationMode   int                       // see Configuration
-	ValidateLinks    bool                      // check and report external references.
-	Valid            bool                      // true means successful validated against ISO 32000.
-	URIs             map[int]map[string]string // URIs for link checking
-	validationReport *ValidationReport
-	noRepair         bool // frozen read policy, also used by lazy source access
+	CurPage                int                       // current page during validation
+	Conf                   *Configuration            // current command being executed
+	ValidationMode         int                       // see Configuration
+	ValidateLinks          bool                      // check and report external references.
+	Valid                  bool                      // true means successful validated against ISO 32000.
+	URIs                   map[int]map[string]string // URIs for link checking
+	validationReport       *ValidationReport
+	noRepair               bool // frozen read policy, also used by lazy source access
+	noRepairNormalizations NoRepairNormalizations
 
 	Optimized      bool
 	Watermarked    bool
@@ -1017,22 +1018,27 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 	// Verify free object 0 as free list head.
 	head, _ := xRefTable.Find(0)
 	if head == nil {
-		if err := xRefTable.RefuseRepair(RepairFreeHead, 0, -1); err != nil {
-			return err
-		}
 		g0 := types.FreeHeadGeneration
 		head = &XRefTableEntry{Free: true, Offset: &zero, Generation: &g0}
 		xRefTable.Table[0] = head
+		if xRefTable.RepairsForbidden() {
+			xRefTable.noRepairNormalizations.FreeListHeadSynthesized = true
+		}
 	}
 
-	// verify generation of 56535
-	if *head.Generation != types.FreeHeadGeneration {
-		// Fix generation for obj 0.
-		if err := xRefTable.RefuseRepair(RepairFreeGeneration, 0, -1); err != nil {
+	// The allowance applies only to a free head, never an in-use object.
+	if !head.Free {
+		if err := xRefTable.RefuseRepair(RepairFreeHead, 0, -1); err != nil {
 			return err
 		}
+	}
 
+	// ISO 32000-1 7.5.4 reserves generation 65535 for object 0.
+	if *head.Generation != types.FreeHeadGeneration {
 		*head.Generation = types.FreeHeadGeneration
+		if xRefTable.RepairsForbidden() {
+			xRefTable.noRepairNormalizations.FreeListHeadGenerationFixed = true
+		}
 	}
 
 	if len(m) == 0 {

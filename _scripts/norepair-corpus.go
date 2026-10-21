@@ -38,13 +38,14 @@ import (
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 )
 
-func read(data []byte, noRepair bool) error {
+func read(data []byte, noRepair bool) (model.NoRepairNormalizations, error) {
+	var facts model.NoRepairNormalizations
 	conf := model.NewStatelessConfiguration()
 	conf.ValidationMode = model.ValidationStrict
 	conf.NoRepair = noRepair
 	ctx, err := pdfcpu.Read(context.Background(), bytes.NewReader(data), conf)
 	if err != nil {
-		return err
+		return facts, err
 	}
 	keys := make([]int, 0, len(ctx.Table))
 	for n := range ctx.Table {
@@ -57,10 +58,10 @@ func read(data []byte, noRepair bool) error {
 			continue
 		}
 		if _, err := ctx.Dereference(*types.NewIndirectRef(n, *e.Generation)); err != nil {
-			return err
+			return facts, err
 		}
 	}
-	return nil
+	return ctx.NoRepairNormalizations(), nil
 }
 
 func main() {
@@ -82,15 +83,21 @@ func main() {
 			return e
 		}
 		counts["files"]++
-		legacy := read(data, false)
+		_, legacy := read(data, false)
 		if legacy == nil {
 			counts["default_ok"]++
 		} else {
 			counts["default_error"]++
 		}
-		e = read(data, true)
+		facts, e := read(data, true)
 		if e == nil {
 			counts["norepair_ok"]++
+			if facts.FreeListHeadSynthesized {
+				counts["free_list_head_synthesized"]++
+			}
+			if facts.FreeListHeadGenerationFixed {
+				counts["free_list_head_generation_fixed"]++
+			}
 			if legacy != nil {
 				counts["norepair_only_ok"]++
 			}

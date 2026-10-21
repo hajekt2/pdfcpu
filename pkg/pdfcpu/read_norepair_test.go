@@ -66,7 +66,7 @@ func TestNoRepairUACheckRegressions(t *testing.T) {
 	}{
 		{"control", "<<  /Length 4 >>\nstream\nq Q\nendstream", false, 0, 4},
 		{"stream length repaired", "<< /Length 0 >>\nstream\nq Q\nendstream", false, model.RepairStreamScan, 3},
-		{"free head synthesized", "<<  /Length 4 >>\nstream\nq Q\nendstream", true, model.RepairFreeHead, 4},
+		{"free head synthesized", "<<  /Length 4 >>\nstream\nq Q\nendstream", true, 0, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := discardClassic([]string{
@@ -86,15 +86,169 @@ func TestNoRepairUACheckRegressions(t *testing.T) {
 			if sd.StreamLength == nil || *sd.StreamLength != tc.length || legacy.Read.RepairOffset != 0 || !legacy.ValidationReport().Empty() {
 				t.Fatal("legacy regression changed")
 			}
-			_, err = noRepairRead(data, true, model.ValidationStrict)
+			ctx, err := noRepairRead(data, true, model.ValidationStrict)
 			if tc.site == 0 {
 				if err != nil {
 					t.Fatal(err)
+				}
+				want := model.NoRepairNormalizations{FreeListHeadSynthesized: tc.omitHead}
+				if got := ctx.NoRepairNormalizations(); got != want {
+					t.Fatalf("normalizations = %+v; want %+v", got, want)
+				}
+				if got := legacy.NoRepairNormalizations(); got != (model.NoRepairNormalizations{}) {
+					t.Fatalf("legacy normalizations = %+v", got)
 				}
 				return
 			}
 			requireRepairRefused(t, err, tc.site)
 		})
+	}
+}
+
+func TestNoRepairFreeListHeadNormalizations(t *testing.T) {
+	clean := discardClassic(discardObjects("(en)"), "", false, "")
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want model.NoRepairNormalizations
+	}{
+		{"clean", clean, model.NoRepairNormalizations{}},
+		{"missing head", bytes.Replace(clean, []byte("xref\n0 5\n0000000000 65535 f \n"), []byte("xref\n1 4\n"), 1), model.NoRepairNormalizations{FreeListHeadSynthesized: true}},
+		{"wrong generation", bytes.Replace(clean, []byte("0000000000 65535 f"), []byte("0000000000 00000 f"), 1), model.NoRepairNormalizations{FreeListHeadGenerationFixed: true}},
+	} {
+		for _, mode := range []int{model.ValidationStrict, model.ValidationRelaxed} {
+			for _, enabled := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/mode=%d/NoRepair=%t", tc.name, mode, enabled), func(t *testing.T) {
+					t.Parallel()
+					ctx, err := noRepairRead(tc.data, enabled, mode)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := tc.want
+					if !enabled {
+						want = model.NoRepairNormalizations{}
+					}
+					if got := ctx.NoRepairNormalizations(); got != want {
+						t.Fatalf("normalizations = %+v; want %+v", got, want)
+					}
+					head := ctx.Table[0]
+					if !head.Free || *head.Generation != types.FreeHeadGeneration || *head.Offset != 0 {
+						t.Fatalf("head = %+v", head)
+					}
+					// The accessor returns a copy; repeated checks retain the facts.
+					snapshot := ctx.NoRepairNormalizations()
+					snapshot.FreeListHeadSynthesized = !snapshot.FreeListHeadSynthesized
+					if err := ctx.EnsureValidFreeList(); err != nil {
+						t.Fatal(err)
+					}
+					if ctx.NoRepairNormalizations() != want {
+						t.Fatal("normalization facts changed")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestNoRepairFreeListNormalizationDoesNotAllowLinkRepair(t *testing.T) {
+	ctx, err := noRepairRead(discardClassic(discardObjects("(en)"), "", false, ""), true, model.ValidationStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(ctx.Table, 0)
+	if err := ctx.EnsureValidFreeList(); err != nil {
+		t.Fatal(err)
+	}
+	if got := ctx.NoRepairNormalizations(); got != (model.NoRepairNormalizations{FreeListHeadSynthesized: true}) {
+		t.Fatalf("synthesis facts = %+v", got)
+	}
+	*ctx.Table[0].Generation = 0
+	link := int64(99)
+	ctx.Table[0].Offset = &link
+	requireRepairRefused(t, ctx.EnsureValidFreeList(), model.RepairFreeLink)
+	if *ctx.Table[0].Generation != types.FreeHeadGeneration || *ctx.Table[0].Offset != 99 {
+		t.Fatal("generation normalization allowed a link correction")
+	}
+	want := model.NoRepairNormalizations{FreeListHeadSynthesized: true, FreeListHeadGenerationFixed: true}
+	if got := ctx.NoRepairNormalizations(); got != want {
+		t.Fatalf("accumulated facts = %+v; want %+v", got, want)
+	}
+}
+
+func TestNoRepairOtherFreeListRepairs(t *testing.T) {
+	entry := func(free bool, next int64, generation int) *model.XRefTableEntry {
+		return &model.XRefTableEntry{Free: free, Offset: &next, Generation: &generation}
+	}
+	for _, tc := range []struct {
+		name               string
+		headNext, freeNext int64
+		freeGeneration     int
+		hasFree, inUseHead bool
+	}{
+		{name: "reset nonzero head", headNext: 99},
+		{name: "truncate broken link", headNext: 4, freeNext: 99, hasFree: true},
+		{name: "truncate cycle", headNext: 4, freeNext: 4, hasFree: true},
+		{name: "choose replacement link", headNext: 99, hasFree: true},
+		{name: "link omitted entry", hasFree: true},
+		{name: "reset permanently deleted link", hasFree: true, freeNext: 99, freeGeneration: types.FreeHeadGeneration},
+		{name: "in-use head", inUseHead: true},
+	} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/NoRepair=%t", tc.name, enabled), func(t *testing.T) {
+				ctx, err := noRepairRead(discardClassic(discardObjects("(en)"), "", false, ""), enabled, model.ValidationStrict)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx.Table = map[int]*model.XRefTableEntry{0: entry(!tc.inUseHead, tc.headNext, types.FreeHeadGeneration)}
+				if tc.hasFree {
+					ctx.Table[4] = entry(true, tc.freeNext, tc.freeGeneration)
+				}
+				err = ctx.EnsureValidFreeList()
+				if !enabled {
+					if err != nil {
+						t.Fatalf("legacy free-list handling: %v", err)
+					}
+					return
+				}
+				site := model.RepairFreeLink
+				if tc.inUseHead {
+					site = model.RepairFreeHead
+				}
+				requireRepairRefused(t, err, site)
+				if *ctx.Table[0].Offset != tc.headNext || ctx.Table[0].Free == tc.inUseHead ||
+					(tc.hasFree && *ctx.Table[4].Offset != tc.freeNext) {
+					t.Fatal("free-list entries changed before refusal")
+				}
+				if ctx.NoRepairNormalizations() != (model.NoRepairNormalizations{}) {
+					t.Fatal("refused repair recorded as normalization")
+				}
+			})
+		}
+	}
+}
+
+func TestNoRepairFreeListShiftStillRefused(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		ctx, err := noRepairRead(discardClassic(discardObjects("(en)"), "", false, ""), enabled, model.ValidationStrict)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delete(ctx.Table, 0)
+		head := model.NewFreeHeadXRefTableEntry()
+		ctx.Table[1] = head
+		before := ctx.Table[2]
+		err = postProcess(ctx, 1)
+		if enabled {
+			requireRepairRefused(t, err, model.RepairFreeHead)
+			if ctx.Table[0] != nil || ctx.Table[1] != head || ctx.Table[2] != before {
+				t.Fatal("objects shifted before refusal")
+			}
+		} else if err != nil || ctx.Table[0] != head || ctx.Table[1] != before {
+			t.Fatalf("legacy shift changed: %v", err)
+		}
+		if ctx.NoRepairNormalizations() != (model.NoRepairNormalizations{}) {
+			t.Fatal("shift recorded as normalization")
+		}
 	}
 }
 
@@ -141,7 +295,6 @@ func TestNoRepairRecoveryFamilies(t *testing.T) {
 		{"object header identity", replace("1 0 obj", "8 0 obj"), model.RepairObjectHeader},
 		{"object header junk", replace("1 0 obj", "x1 0 bj"), model.RepairObjectHeader},
 		{"empty object", discardClassic([]string{discardObjects("(en)")[0], discardObjects("(en)")[1], discardObjects("(en)")[2], ""}, "", false, ""), model.RepairObjectNull},
-		{"free generation", replace("0000000000 65535 f", "0000000000 00000 f"), model.RepairFreeGeneration},
 		{"free link", replace("0000000000 65535 f", "0000000999 65535 f"), model.RepairFreeLink},
 		{"header offset", append([]byte("junk\n"), clean...), model.RepairHeader},
 		{"root version", catalog("(en) /Version /1.8"), model.RepairRootVersion},
@@ -367,16 +520,6 @@ func TestNoRepairRejectsBeforeChangingSource(t *testing.T) {
 	ctx, err := Read(t.Context(), bytes.NewReader(data), conf)
 	if err != nil {
 		t.Fatal(err)
-	}
-	*ctx.Table[0].Generation = 0
-	requireRepairRefused(t, ctx.EnsureValidFreeList(), model.RepairFreeGeneration)
-	if *ctx.Table[0].Generation != 0 {
-		t.Fatal("generation changed before refusal")
-	}
-	delete(ctx.Table, 0)
-	requireRepairRefused(t, ctx.EnsureValidFreeList(), model.RepairFreeHead)
-	if ctx.Table[0] != nil {
-		t.Fatal("head synthesized before refusal")
 	}
 	table := ctx.Table
 	requireRepairRefused(t, bypassXrefSection(t.Context(), ctx, 0, nil, 1), model.RepairXRefReconstruction)

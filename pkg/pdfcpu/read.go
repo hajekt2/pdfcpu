@@ -2113,13 +2113,12 @@ func postProcess(ctx *model.Context, xrefSectionCount int) error {
 	// Ensure free object #0 if exactly one xref subsection
 	// and in one of the following weird situations:
 	if xrefSectionCount == 1 && !ctx.Exists(0) {
-		if err := ctx.XRefTable.RefuseRepair(model.RepairFreeHead, 0, -1); err != nil {
-			return err
-		}
-
 		// Fix for #250
 		e := ctx.Table[1]
 		if e != nil && e.Free {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairFreeHead, 0, -1); err != nil {
+				return err
+			}
 			// Create free object 0 by shifting down parsed objects by one.
 			for _, objNr := range slices.Sorted(maps.Keys(ctx.Table)) {
 				if objNr == 0 {
@@ -2132,6 +2131,10 @@ func postProcess(ctx *model.Context, xrefSectionCount int) error {
 				}
 			}
 		} else {
+			if ctx.XRefTable.RepairsForbidden() {
+				// EnsureValidFreeList synthesizes and records the missing head.
+				return nil
+			}
 			// Create free object 0 from scratch if the free list head is missing.
 			g0 := types.FreeHeadGeneration
 			ctx.Table[0] = &model.XRefTableEntry{Free: true, Offset: &zero, Generation: &g0}

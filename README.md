@@ -17,11 +17,14 @@
 > upstream pdfcpu accepts equivalent reader hooks.
 >
 > `Configuration.NoRepair` defaults to false. When true, the reader refuses
-> recovery with `*model.RepairRefusedError`, containing a closed site code and
-> numeric locations only. The policy remains active in lazy object-stream and
+> recovery except for recorded object-0 free-list-head synthesis and generation
+> normalization. Other recovery returns `*model.RepairRefusedError`, containing
+> a closed site code and numeric locations only. The policy remains active in lazy object-stream and
 > filter decoding after Read returns. Callers must check those later errors
-> before issuing a no-repair certificate. See [NOREPAIR.md](NOREPAIR.md) for
-> the complete read-path inventory, normal-decoding classifications and tests.
+> before issuing a read certificate. `ctx.NoRepairNormalizations()` returns a
+> read-only snapshot of the two permitted normalization facts. See
+> [NOREPAIR.md](NOREPAIR.md) for the complete read-path inventory,
+> normal-decoding classifications and tests.
 
 [![Test](https://github.com/pdfcpu/pdfcpu/workflows/Test/badge.svg)](https://github.com/pdfcpu/pdfcpu/actions)
 [![Coverage Status](https://coveralls.io/repos/github/pdfcpu/pdfcpu/badge.svg?branch=master)](https://coveralls.io/github/pdfcpu/pdfcpu?branch=master)

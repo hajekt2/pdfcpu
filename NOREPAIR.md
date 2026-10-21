@@ -2,7 +2,8 @@
 
 `Configuration.NoRepair` is an opt-in, API-only reader setting. It defaults to
 false and is independent of strict or relaxed validation. When enabled, the
-reader refuses the first recovery attempt with `*model.RepairRefusedError`.
+reader allows only the two recorded free-list-head normalizations below and
+refuses the first other recovery attempt with `*model.RepairRefusedError`.
 `errors.As` finds it through reader error wrappers. The error contains only a
 closed `model.RepairSite` code and numeric `Object` and `Offset` locations.
 Object -1 means unknown; object 0 identifies a classic trailer or free-list head.
@@ -22,7 +23,37 @@ conf.NoRepair = true
 ctx, err := pdfcpu.Read(c, input, conf)
 // Check err. Also check every subsequent lazy dereference or stream decode error.
 _ = ctx
+facts := ctx.NoRepairNormalizations() // Value copy; cannot change the record.
+_ = facts
 ```
+
+## Permitted free-list-head normalizations
+
+Owner decision, 2026-10-21 (quote): "allow free-list normalization".
+This allowance is limited to object 0. ISO 32000-1 7.5.4 reserves it as the
+free-list head, with generation 65535. It is never an in-use object, so these
+changes cannot change the content selected for any in-use object.
+
+| Normalization | Recorded fact |
+| --- | --- |
+| Synthesize missing free object 0 without moving any other entry. | `FreeListHeadSynthesized` |
+| Correct an existing free object 0's generation to 65535. | `FreeListHeadGenerationFixed` |
+
+`ctx.NoRepairNormalizations()` returns a `model.NoRepairNormalizations` value
+with only these two boolean facts. The context keeps the record private. Facts
+accumulate when a normalization occurs; an already-correct head adds no fact.
+They remain false when NoRepair is disabled. A synthesized head already has
+generation 65535, so synthesis alone does not set the generation-correction fact.
+In `postProcess`, NoRepair defers synthesis to `EnsureValidFreeList`, which records
+it. The legacy path is unchanged.
+
+Every other free-list correction still refuses: shifting object numbers to make
+room for a head; reclassifying an in-use entry as free; replacing a missing link;
+truncating a broken or cyclic link; resetting a nonzero head link; inserting or
+linking omitted free entries; and resetting a permanently deleted entry's
+nonzero link. An allowed head normalization does not authorize any of these.
+`RepairFreeGeneration` remains a reserved enum value for API compatibility;
+object-0 generation correction no longer returns it.
 
 A successful initial read covers the initial phases only. A lazy member can
 still refuse later. A certificate consumer must materialize every object and
@@ -84,8 +115,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairObjectHeader` | `readObjectAttributes`: filtering junk prolog bytes, missing generation or the abbreviated bj marker accepted by `ParseObjectAttributes`. `object`: accepting a mismatched number or generation at the declared offset. |
 | `RepairObjectNull` | `object`: treating an empty indirect-object body as null. |
 | `RepairObjectSkipped` | `ParseObject`: swallowing EOF in relaxed mode. `dereferenceAndLoad`: skipping failed objects, before retry or acceptance. Existing typed refusals are propagated first. |
-| `RepairFreeHead` | `postProcess`: synthesizing object zero or shifting all entries down. `EnsureValidFreeList`: synthesizing a missing head. |
-| `RepairFreeGeneration` | `EnsureValidFreeList`: replacing the head generation. |
+| `RepairFreeHead` | `postProcess`: shifting all entries down to create object zero. `EnsureValidFreeList`: rejecting an in-use head before normalization. Head-only synthesis and generation correction are the named allowances above. |
 | `RepairFreeLink` | `validateFreeList`: choosing replacement links or truncating broken/cyclic links. `EnsureValidFreeList`: resetting a nonzero head link. `handleDanglingFree`: linking omitted free objects or fixing a permanently deleted object's nonzero link. Writer-only recycling is outside the read call graph. |
 | `RepairRootVersion` | `identifyRootVersion`: accepting an invalid catalog Version, including the strict-mode silent ignore and relaxed version coercion. |
 | `RepairEncryption` | `supportedEncryption` and `validateEncryptionVersion`: accepted password-entry, permission and crypt-filter representation violations. `decryptAESBytes`: accepting absent or invalid AES padding; a copy protects the source while checking padding in NoRepair mode. Standard successful decryption remains allowed. |
@@ -126,12 +156,17 @@ materialize values or create an internal representation.
 `read_norepair_test.go` ports uacheck's control, silent stream-length replacement
 and silent free-head synthesis from origin/main commit
 `04a7c99a0b778912926230f34a5b1ea33884f2f4`.
+The free-head regression now loads with `FreeListHeadSynthesized` recorded;
+the stream-length regression still refuses and the control loads without facts.
 It exercises repair families with generated public fixtures, checks default
 loading, tests strict reconstruction, tests refused mutations, and checks lazy
 members after read return with the caller configuration changed. Concurrent
 contexts share a read-only configuration. Real existing fixtures verify hybrid
 and linearized traversal; generated controls verify classic/xref/object streams,
 incremental updates, indirect lengths, PDF 2.0 direct Info, RC4, AES-128 and AES-256.
+Free-list tests cover both normalization facts, snapshot isolation, repeated
+checks, strict and relaxed reads, unchanged default behavior, and every refused
+free-list correction listed above.
 
 Required gates:
 
@@ -155,7 +190,28 @@ There were no other errors. These are syntax-read counts, not accessibility
 verdicts or a uacheck pin-change measurement. Private corpus replay belongs to
 the separate integration/pin update.
 
+After the approved object-0 normalization change on 2026-10-21, the same command
+on `/home/haja/work/uacheck-corpus/public` again materialized every nonfree object.
+Default strict reads still loaded 527/527. NoRepair strict reads loaded 299/527
+and refused 228/527, with no other errors:
+
+| First refusal site | Files refused / 527 total |
+| --- | --- |
+| `RepairXRefSize` (6) | 227 |
+| `RepairFreeLink` (29) | 1 |
+
+Among the 299 loaded NoRepair files, 234 recorded
+`FreeListHeadGenerationFixed`; none recorded `FreeListHeadSynthesized`.
+The remaining 65 loaded without normalization facts. Counts include facts only
+for successful reads; failed reads return no context. The missing-head fixture
+verifies synthesis independently. The newly reached Size and link repairs remain
+refused under the unchanged policy for those sites.
+
 All four gates passed on Linux with Go 1.26.0 on 2026-10-21.
+The full-suite retry used `GOFLAGS=-p=1` and an isolated `XDG_CONFIG_HOME` under
+`.git/f1b-validation/config-test`. The initial parallel run failed when shared
+font-cache files disappeared during installation/reload in other test packages.
+The serialized, isolated run passed; no test source was changed for this issue.
 The existing parser/model and discard-log tests are retained unchanged. The
 uacheck dependency pin and product proof flags are outside this fork change.
 No PAC validation semantics or RE behavior claims are introduced.

@@ -56,7 +56,7 @@ const (
 	RepairObjectNull
 	RepairObjectSkipped
 	RepairFreeHead
-	RepairFreeGeneration
+	RepairFreeGeneration // Reserved: object-0 generation normalization is now allowed.
 	RepairFreeLink
 	RepairRootVersion
 	RepairEncryption
@@ -72,6 +72,20 @@ type RepairRefusedError struct {
 	Site   RepairSite
 	Object int
 	Offset int64
+}
+
+// NoRepairNormalizations records the permitted object-0 normalizations during a
+// NoRepair read. These facts contain no source content and do not certify later
+// validation, optimization or writing.
+type NoRepairNormalizations struct {
+	FreeListHeadSynthesized     bool
+	FreeListHeadGenerationFixed bool
+}
+
+// NoRepairNormalizations returns a read-only snapshot of this table's facts.
+// Changing the returned value cannot change the context's record.
+func (xRefTable *XRefTable) NoRepairNormalizations() NoRepairNormalizations {
+	return xRefTable.noRepairNormalizations
 }
 
 func (e *RepairRefusedError) Error() string {
