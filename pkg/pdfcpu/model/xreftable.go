@@ -1023,7 +1023,9 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 
 	// Verify free object 0 as free list head.
 	head, _ := xRefTable.Find(0)
-	if head == nil {
+	// An unknown-type null placeholder is not a source free head. Synthesize
+	// the permitted internal head and record that fact only under NoRepair.
+	if head == nil || (head.Null && xRefTable.RepairsForbidden()) {
 		g0 := types.FreeHeadGeneration
 		head = &XRefTableEntry{Free: true, Offset: &zero, Generation: &g0}
 		xRefTable.Table[0] = head

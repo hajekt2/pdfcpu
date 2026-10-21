@@ -19,10 +19,13 @@ limitations under the License.
 package pdfcpu
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strconv"
+	"strings"
 
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
@@ -164,6 +167,81 @@ func trimPDFSpace(s string) string {
 		s = s[1:]
 	}
 	return s
+}
+
+// Keep the legacy Unicode whitespace handling outside NoRepair. PDF syntax
+// uses only the six bytes in ISO 32000-1 Table 1, including NUL but not VT.
+func trimReadSpace(s string, noRepair bool) string {
+	if noRepair {
+		return strings.Trim(s, "\x00\t\n\f\r ")
+	}
+	return strings.TrimSpace(s)
+}
+
+func readFields(s string, noRepair bool) []string {
+	if noRepair {
+		return strings.FieldsFunc(s, func(r rune) bool { return r <= ' ' && pdfSpace(byte(r)) })
+	}
+	return strings.Fields(s)
+}
+
+func pdfFieldsAndComments(s string) []string {
+	var fields []string
+	for s = trimPDFSpaceAndComments(s); s != ""; s = trimPDFSpaceAndComments(s) {
+		i := 0
+		for i < len(s) && !pdfSpace(s[i]) && s[i] != '%' {
+			i++
+		}
+		fields = append(fields, s[:i])
+		s = s[i:]
+	}
+	return fields
+}
+
+// Let the ordinary parser locate the end of the trailer dictionary. A byte
+// search alone can mistake startxref inside a comment, name or string for the
+// epilog and silently omit subsequent tokens. Parsing here creates only a
+// temporary value; processTrailer parses the selected dictionary as usual.
+func scanTrailerWithoutRepair(c context.Context, ctx *model.Context, s *bufio.Scanner, line string) (string, error) {
+	var buf strings.Builder
+	var parseErr error
+	for {
+		if err := c.Err(); err != nil {
+			return "", err
+		}
+		buf.WriteString(line)
+		buf.WriteByte('\n')
+		if int64(buf.Len()) > objectBufferLimit(ctx) {
+			return "", errObjectBufferLimit
+		}
+		if strings.Contains(line, "startxref") {
+			source := buf.String()
+			rest := source
+			result, err := model.ParseObjectWithPolicy(c, &rest, 0, ctx.XRefTable.ValidationMode, recursionLimit(ctx))
+			// An apparent marker may be inside a still-incomplete string or
+			// dictionary. Keep reading before treating its parse error as final.
+			parseErr = err
+			if err == nil {
+				if _, ok := result.Object.(types.Dict); !ok {
+					return "", errCorruptTrailerDict
+				}
+				tail := trimPDFSpaceAndComments(rest)
+				if tail != "" {
+					if !strings.HasPrefix(tail, "startxref") || (len(tail) > 9 && !pdfSpace(tail[9])) {
+						return "", model.RefuseRepair(c, model.RepairParserToken)
+					}
+					return source[:len(source)-len(rest)], nil
+				}
+			}
+		}
+		var err error
+		if line, err = scanLine(s); err != nil {
+			if errors.Is(err, errMissingScannerLine) && parseErr != nil {
+				return "", parseErr
+			}
+			return "", err
+		}
+	}
 }
 
 // The low-level stream helpers also guard their actual recovery sites, so a

@@ -338,13 +338,16 @@ func offsetLastXRefSection(ctx *model.Context, skip int64) (*int64, error) {
 			}
 		}
 		p = p[:posEOF]
-		s := strings.TrimSpace(string(p))
+		s := trimReadSpace(string(p), ctx.XRefTable.RepairsForbidden())
+		if ctx.XRefTable.RepairsForbidden() && strings.TrimSpace(s) != s {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, off+int64(start))
+		}
 		if strings.HasSuffix(s, "%") {
 			if err := ctx.XRefTable.RefuseRepair(model.RepairEOF, -1, -1); err != nil {
 				return nil, err
 			}
 		}
-		s = strings.TrimSpace(strings.TrimRight(s, "%"))
+		s = trimReadSpace(strings.TrimRight(s, "%"), ctx.XRefTable.RepairsForbidden())
 		offset, err = strconv.ParseInt(s, 10, 64)
 		if err != nil {
 			return nil, errInvalidLastXRefSection
@@ -551,7 +554,7 @@ func parseXRefTableSubSection(xRefTable *model.XRefTable, limits model.ResourceL
 				return "", err
 			}
 
-			fields = strings.Fields(line)
+			fields = readFields(line, xRefTable.RepairsForbidden())
 			if len(fields) != 3 {
 				if i < objCount {
 					return "", errIncompleteXRefSubsection
@@ -716,17 +719,21 @@ func parseObjectStream(c context.Context, osd *types.ObjectStreamDict, limits mo
 	}
 	prolog := decodedContent[:osd.FirstObjOffset]
 
-	// Remove inline comment.
-	if i := bytes.Index(prolog, []byte("%")); i != -1 {
-		prolog = prolog[:i]
+	var objs []string
+	if model.RepairsForbidden(c) {
+		objs = pdfFieldsAndComments(string(prolog))
+	} else {
+		// Preserve legacy comment truncation and NUL handling.
+		if i := bytes.Index(prolog, []byte("%")); i != -1 {
+			prolog = prolog[:i]
+		}
+		prolog = bytes.ReplaceAll(prolog, []byte{0x00}, []byte{0x20})
+		objs = strings.Fields(string(prolog))
 	}
-
-	// The separator used in the prolog shall be white space
-	// but some PDF writers use 0x00.
-	prolog = bytes.ReplaceAll(prolog, []byte{0x00}, []byte{0x20})
-
-	objs := strings.Fields(string(prolog))
 	if len(objs)%2 > 0 {
+		if err := model.RefuseRepair(c, model.RepairObjectStreamIndex); err != nil {
+			return err
+		}
 		return errCorruptObjectStreamDict
 	}
 	entryCount := len(objs) / 2
@@ -739,6 +746,9 @@ func parseObjectStream(c context.Context, osd *types.ObjectStreamDict, limits mo
 		)
 	}
 	if entryCount != osd.ObjCount {
+		if err := model.RefuseRepair(c, model.RepairObjectStreamIndex); err != nil {
+			return err
+		}
 		return fmt.Errorf(
 			"object stream index contains %d entries, expected %d: %w",
 			entryCount,
@@ -1535,10 +1545,20 @@ func scanLine(s *bufio.Scanner) (s1 string, err error) {
 	return s1, nil
 }
 
-func scanTrailerDictStart(s *bufio.Scanner, line *string) error {
+func scanTrailerDictStart(c context.Context, s *bufio.Scanner, line *string) error {
 	l := *line
 	var err error
 	for {
+		if model.RepairsForbidden(c) {
+			l = trimPDFSpaceAndComments(l)
+			if strings.HasPrefix(l, "<<") {
+				*line = l
+				return nil
+			}
+			if l != "" {
+				return model.RefuseRepair(c, model.RepairParserToken)
+			}
+		}
 		i := strings.Index(l, "<<")
 		if i >= 0 {
 			*line = l[i:]
@@ -1582,14 +1602,17 @@ func scanTrailerDictRemainder(s *bufio.Scanner, line string, buf bytes.Buffer) (
 	return buf.String(), nil
 }
 
-func scanTrailer(s *bufio.Scanner, line string) (string, error) {
+func scanTrailer(c context.Context, ctx *model.Context, s *bufio.Scanner, line string) (string, error) {
 	var buf bytes.Buffer
 	if log.ReadEnabled() {
 		log.Read.Printf("line: <%s>\n", line)
 	}
 
-	if err := scanTrailerDictStart(s, &line); err != nil {
+	if err := scanTrailerDictStart(c, s, &line); err != nil {
 		return "", err
+	}
+	if ctx.XRefTable.RepairsForbidden() {
+		return scanTrailerWithoutRepair(c, ctx, s, line)
 	}
 
 	return scanTrailerDictRemainder(s, line, buf)
@@ -1609,7 +1632,8 @@ func processTrailer(c context.Context, ctx *model.Context, s *bufio.Scanner, lin
 		}
 	}
 
-	trailerString, err := scanTrailer(s, trailerString)
+	c = model.WithRepairScope(c, ctx.XRefTable.RepairsForbidden(), 0, -1)
+	trailerString, err := scanTrailer(c, ctx, s, trailerString)
 	if err != nil {
 		return nil, err
 	}
@@ -1658,10 +1682,13 @@ func parseXRefSection(c context.Context, ctx *model.Context, s *bufio.Scanner, f
 			log.Read.Printf("parseXRefSection: <%s>\n", line)
 		}
 
-		fields = strings.Fields(line)
+		fields = readFields(line, ctx.XRefTable.RepairsForbidden())
 	}
 
 	line = strings.TrimLeft(line, " ")
+	if ctx.XRefTable.RepairsForbidden() {
+		line = trimPDFSpace(line)
+	}
 	if !strings.HasPrefix(line, "trailer") {
 		// Process all sub sections of this xRef section.
 		if line, err = parseXRefTableSubSection(ctx.XRefTable, ctx.Configuration.Limits, s, fields, offExtra, incr); err != nil {
@@ -1669,6 +1696,9 @@ func parseXRefSection(c context.Context, ctx *model.Context, s *bufio.Scanner, f
 		}
 		*ssCount++
 		line = strings.TrimLeft(line, " ")
+		if ctx.XRefTable.RepairsForbidden() {
+			line = trimPDFSpace(line)
+		}
 	}
 
 	if log.ReadEnabled() {
@@ -2175,7 +2205,15 @@ func tryXRefSection(c context.Context, ctx *model.Context, rs io.ReadSeeker, off
 	}
 	repairOff := len(line)
 
-	if strings.TrimSpace(line) == "xref" {
+	if ctx.XRefTable.RepairsForbidden() && strings.TrimSpace(line) == "xref" {
+		if !strings.HasPrefix(line, "xref") {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairXRefShift, -1, *offset)
+		}
+		if trimReadSpace(line, true) != "xref" {
+			return nil, ctx.XRefTable.RefuseRepair(model.RepairXRefEntry, -1, *offset)
+		}
+	}
+	if trimReadSpace(line, ctx.XRefTable.RepairsForbidden()) == "xref" {
 		if log.ReadEnabled() {
 			log.Read.Println("tryXRefSection: found xref section")
 		}
@@ -2534,7 +2572,7 @@ func buffer(c context.Context, rd io.Reader, maxObjectBytes int64) (buf []byte, 
 
 		// For very rare cases where "stream" also occurs within obj dict
 		// we need to find the last "stream" marker before a possible end marker.
-		for streamInd > 0 && !keywordStreamRightAfterEndOfDict(line, streamInd) {
+		for streamInd > 0 && !keywordStreamRightAfterEndOfDict(line, streamInd, model.RepairsForbidden(c)) {
 			lastStreamMarker(&streamInd, endInd, line)
 		}
 
@@ -2562,7 +2600,7 @@ func buffer(c context.Context, rd io.Reader, maxObjectBytes int64) (buf []byte, 
 }
 
 // return true if 'stream' follows end of dict: >>{whitespace}stream
-func keywordStreamRightAfterEndOfDict(buf string, streamInd int) bool {
+func keywordStreamRightAfterEndOfDict(buf string, streamInd int, noRepair bool) bool {
 	//log.Read.Println("keywordStreamRightAfterEndOfDict: begin")
 
 	// Get a slice of the chunk right in front of 'stream'.
@@ -2576,6 +2614,9 @@ func keywordStreamRightAfterEndOfDict(buf string, streamInd int) bool {
 	}
 
 	// We found the last >>. Return true if after end of dict only whitespace.
+	if noRepair {
+		return trimPDFSpaceAndComments(b[eod+2:]) == ""
+	}
 	ok := strings.TrimSpace(b[eod:]) == ">>"
 
 	//log.Read.Printf("keywordStreamRightAfterEndOfDict: end, %v\n", ok)
@@ -2869,19 +2910,7 @@ func parseObjectWithValidationPolicy(c context.Context, ctx *model.Context, line
 	c = model.WithDiscardScope(c, ctx.XRefTable.Discards, objNr, offset)
 	result, err := model.ParseObjectWithPolicy(c, line, 0, ctx.XRefTable.ValidationMode, recursionLimit(ctx))
 	if err == nil && ctx.XRefTable.RepairsForbidden() {
-		rest := *line
-		for {
-			rest = strings.TrimLeft(rest, "\x00\t\n\f\r ")
-			if !strings.HasPrefix(rest, "%") {
-				break
-			}
-			if i := strings.IndexAny(rest, "\r\n"); i >= 0 {
-				rest = rest[i:]
-			} else {
-				rest = ""
-			}
-		}
-		if rest != "" {
+		if trimPDFSpaceAndComments(*line) != "" {
 			return nil, model.RefuseRepair(c, model.RepairParserToken)
 		}
 	}
@@ -3047,7 +3076,7 @@ func object(c context.Context, ctx *model.Context, offset int64, objNr, genNr in
 		}
 	}
 
-	l = strings.TrimSpace(l)
+	l = trimReadSpace(l, ctx.XRefTable.RepairsForbidden())
 	if len(l) == 0 {
 		if err := ctx.XRefTable.RefuseRepair(model.RepairObjectNull, objNr, offset); err != nil {
 			return nil, 0, 0, 0, err

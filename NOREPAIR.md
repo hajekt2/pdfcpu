@@ -39,7 +39,7 @@ changes cannot change the content selected for any in-use object.
 
 | Normalization | Recorded fact |
 | --- | --- |
-| Synthesize missing free object 0 without moving any other entry. | `FreeListHeadSynthesized` |
+| Synthesize missing free object 0, including an unknown-type null placeholder at slot 0, without moving any other entry. | `FreeListHeadSynthesized` |
 | Correct an existing free object 0's generation to 65535. | `FreeListHeadGenerationFixed` |
 
 `ctx.NoRepairNormalizations()` returns a `model.NoRepairNormalizations` value
@@ -48,6 +48,10 @@ keeps the record private. Facts accumulate when a normalization occurs; an
 already-correct head adds no fact. All facts remain false or zero when NoRepair
 is disabled. A synthesized head already has generation 65535, so synthesis alone
 does not set the generation-correction fact.
+An unknown-type xref-stream entry has null semantics under 7.5.8.3. At slot 0,
+it is not a source free head. NoRepair replaces that placeholder with an internal
+free head and records synthesis alone. Ordinary unknown-type entries remain null
+placeholders, with no normalization fact.
 In `postProcess`, NoRepair defers synthesis to `EnsureValidFreeList`, which records
 it. The legacy path is unchanged.
 
@@ -141,7 +145,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairXRefGeneration` | `parseXRefTableEntry` refuses the oversized generation that `decodeSubsection` would replace with zero. |
 | `RepairXRefSize` | `xRefStreamDict` selects bounded strict Index/Size parsing under either validation mode and translates correction candidates to this site. It never reaches the relaxed Size update. `parseTrailerSize` refuses discarding invalid Size. At the end of `Read`, `NormalizeReadXRefSize` permits only the recorded oversized-bound correction above and refuses every other final replacement. |
 | `RepairXRefCycle` | `buildXRefTableStartingAt`: selecting an earlier epilog after revisiting an xref offset. |
-| `RepairEOF` | `offsetLastXRefSection`: truncated EOF acceptance, non-whitespace trailing epilog bytes, percent trimming from the offset, a missing separator after startxref, or discarding an out-of-range latest offset. Missing sections that would reconstruct use `RepairXRefReconstruction`. |
+| `RepairEOF` | `offsetLastXRefSection`: truncated EOF acceptance, non-PDF-whitespace epilog bytes, percent trimming from the offset, a missing separator after startxref, or discarding an out-of-range latest offset. Missing sections that would reconstruct use `RepairXRefReconstruction`. |
 | `RepairHeader` | `buildXRefTableStartingAt`: accepting a displaced header and adding its displacement to source offsets. |
 | `RepairTrailerID` | `parseTrailerID`: duplicating a one-element ID array. `setupEncryptionKey`: accepting a missing encrypted-file ID. |
 | `RepairFilterName` | `pdfFilterPipeline` / `normalizeStreamFilterName`: expanding inline-image-only aliases on ordinary streams. The check precedes dictionary changes. |
@@ -151,7 +155,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairStreamMarker` | `buffer`: non-EOL bytes after `stream`, before `nextStreamOffset` can tolerate spaces or use an invalid boundary. |
 | `RepairPlaintextMetadata` | `decryptStreamContent` / `repairablePlaintextMetadata`: accepting valid plaintext XML after an AES ciphertext-shape failure. The guard precedes acceptance. |
 | `RepairParserHex` | `parseHexLiteralOrDict`: invalid hex literal replacement with null, before recording a discard or returning a replacement. |
-| `RepairParserToken` | `parseObjectValue`: an unparseable bare token becoming null. `parseObjectWithValidationPolicy` and `compressedObject`: discarding unconsumed trailing object/member tokens. |
+| `RepairParserToken` | `parseObjectValue`: an unparseable bare token becoming null. `parseObjectWithValidationPolicy` and `compressedObject`: discarding unconsumed trailing object/member tokens. `scanTrailerDictStart`: skipping tokens before the trailer dictionary. `scanTrailerWithoutRepair`: ignoring tokens between that dictionary and the epilog, including tokens hidden by a comment containing startxref in the legacy scanner. |
 | `RepairParserInteger` | `parseObjectValue`: an out-of-range integer becoming zero. |
 | `RepairParserFallback` | `ParseObjectWithPolicy` and `model.ParseObject`: entering the repair parser after a failed first pass, including junk keys and missing-value/EOL substitution in `processDictKeys`. It refuses before the second parse. |
 | `RepairParserKeyword` | `parseObjectValue`: case correction for true, false or null. |
@@ -164,7 +168,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairFreeLink` | `validateFreeList`: choosing replacement links or truncating broken/cyclic links. `EnsureValidFreeList`: resetting a nonzero head link. `handleDanglingFree`: linking omitted free objects or fixing a permanently deleted object's nonzero link. Writer-only recycling is outside the read call graph. |
 | `RepairRootVersion` | `identifyRootVersion`: accepting an invalid catalog Version, including the strict-mode silent ignore and relaxed version coercion. |
 | `RepairEncryption` | `supportedEncryption` and `validateEncryptionVersion`: accepted password-entry, permission and crypt-filter representation violations. `decryptAESBytes`: accepting absent or invalid AES padding; a copy protects the source while checking padding in NoRepair mode. Standard successful decryption remains allowed. |
-| `RepairObjectStreamIndex` | `buildObjectArrayForObjectStream`: accepting malformed or duplicate prolog object numbers. `decompressXRefTableEntry` compares the retained prolog number at the requested index with the xref object number before assigning the member. Superseded members that have no selected xref entry need no identity assignment. |
+| `RepairObjectStreamIndex` | `buildObjectArrayForObjectStream`: accepting malformed or duplicate prolog object numbers. `parseObjectStream` reads the complete prolog using PDF whitespace and comments; it refuses incomplete pairs or a count inconsistent with N, including extra tokens after a comment. `decompressXRefTableEntry` compares the retained prolog number at the requested index with the xref object number before assigning the member. Superseded members that have no selected xref entry need no identity assignment. |
 | `RepairFilterData` | Reader-created `StreamDict` retains this numeric error. `filter.flate.passThru` and `decodePostProcessRows` refuse unexpected EOF tolerance, including complete-row predictor output with a truncated zlib ending. `runLengthDecode.decode` and `asciiHexDecode.DecodeLength` refuse missing EOD on full decoding. ASCIIHex permits the standard odd final nibble only at EOD. The policy-managed LZW reader requires initial CLEAR, EOD, zero final padding bits, and a CLEAR or EOD when the code table is full. CCITT full decoding requires RTC/EOFB when EndOfBlock is true, which overrides Rows. EndOfBlock=false with a known row count stops at the declared rows without requiring a trailer. Existing unsupported CCITT forms remain unsupported; no damaged-row substitution is added. The error survives deferred stream or object-stream decoding. Bounded decoding that reaches its requested prefix is normal decoding. |
 
 The reconstruction-only helpers `registerXRefObjects`, `registerXRefEntry`,
@@ -184,12 +188,13 @@ materialize values or create an internal representation.
 | --- | --- |
 | Bounded header/startxref search | Locating the declared syntax is ordinary reading. Accepting a displaced header, bad latest offset or malformed epilog is guarded separately. |
 | Classic, stream, hybrid, incremental and linearized traversal | Reading the selected entries and following declared Prev/XRefStm links follows PDF syntax. Newest entries supersede older entries without reconstruction. |
-| Unknown xref-stream entry types | PDF 7.5.8.3 requires treating these entries as null. An explicit `XRefTableEntry.Null` marker distinguishes these placeholders from source free entries. NoRepair excludes them from free-list membership without linking or reclassifying them. Default reads retain the legacy bookkeeping. A source free-list link to a null placeholder is still a broken link and refuses. |
+| Unknown xref-stream entry types | PDF 7.5.8.3 requires treating these entries as null. An explicit `XRefTableEntry.Null` marker distinguishes these placeholders from source free entries. NoRepair excludes ordinary null placeholders from free-list membership without linking or reclassifying them. Slot 0 uses the recorded head-synthesis allowance above. Default reads retain the legacy bookkeeping. A source free-list link to an ordinary null placeholder is still a broken link and refuses. |
 | Xref W defaults; compressed-object generation zero | The standard defines these implicit values. |
 | Reference and bootstrap resolution | Dereferencing valid direct/indirect Length, First, N, filter and encryption entries preserves the source value. Undefined indirect references resolve to null under 7.3.10. |
 | Direct PDF 2.0 Info materialization | `materializeDirectInfoDict` creates an internal indirect object for standard direct Info syntax. It allocates beyond existing objects without repairing the source. |
 | Recursive parser | PDF whitespace, comments, name hex escapes, string-literal escapes, odd hex-nibble padding and dropping null-valued dictionary entries are standard syntax rules. Integer/real lookahead distinguishes references from separate numeric values. |
 | Object-stream prolog and member slicing | The declared First/N/index offsets select decoded members. NUL is PDF whitespace. Comments are lexical syntax. Bounds, counts and decreasing offsets already return errors. Policy closures retain refusal through lazy parsing. |
+| NoRepair whitespace and trailer boundaries | ISO 32000-1 7.2.2, Table 1 defines six whitespace bytes: NUL, HT, LF, FF, CR and space. NoRepair uses that set for epilog offsets, xref markers and fields, object boundaries, hex strings, stream boundaries and object-stream prologs. VT and Unicode spaces cannot move a marker or disappear before parsing. Trailer scanning uses the parser's dictionary boundary, so comments, names and strings containing startxref do not end the trailer. Comments before the dictionary remain ordinary syntax. |
 | Standard security handler | Password authentication, key derivation, RC4/AES decryption, signature-string exclusions, Identity filters and EncryptMetadata=false follow declared security settings. Deriving a decrypted stream's Length with `ensureStreamLength` is decoding, not a replacement of the encoded source extent. |
 | Filter decoding | ASCIIHex, ASCII85, LZW, Flate predictors, RunLength, CCITT and DCT decode their declared representation. Predictor defaults and CCITT Rows/Height derivation supply decoder parameters without changing the source dictionary. Prefix decoding can stop at a requested length. Malformed termination tolerance in Flate, RunLength, ASCIIHex, LZW and CCITT is guarded separately. |
 | Opaque image/unsupported filters | Preserving encoded DCT/JPX/JBIG2 bytes, or leaving an unsupported stream undecoded, does not replace source bytes. A successful read does not certify every image/content codec. |
@@ -384,3 +389,63 @@ git diff --check
 
 The corpus and census commands in the earlier report were rerun with the
 results above. Test-generated sample changes were removed after verification.
+
+## Recheck corrections and sibling audit, 2026-10-21
+
+The recheck findings at `d816f0a` also reproduced at `6141e1b`. The added
+`read_norepair_recheck_test.go` covers all three findings and related paths:
+
+- Trailer scanning refuses non-comment tokens before the dictionary with
+  `RepairParserToken`, in both validation modes. A parser-derived dictionary
+  boundary also prevents comments containing startxref from hiding later junk.
+  Valid comments, names and multiline strings containing that word remain syntax.
+- Shifted classic xrefs refuse with `RepairXRefShift`, including prefixes that
+  Go's Unicode whitespace trimming accepts. The sibling audit covers epilog
+  offsets, xref subsection/row fields, object boundaries, hex strings, stream
+  boundaries and object-stream prologs. PDF whitespace remains accepted where
+  syntax allows it. Other invalid syntax can retain an ordinary parse error.
+- Object-stream prolog comments end at EOL. The reader examines subsequent
+  tokens instead of dropping the rest of the prolog at the first percent sign.
+  Extra tokens and incomplete pairs refuse with `RepairObjectStreamIndex`.
+- Unknown-type object-0 entries record head synthesis alone. Types 3, 42 and
+  255 are covered under strict/relaxed and default/NoRepair configurations.
+  Existing source free heads, ordinary unknown-type null entries, all other
+  free-list refusals and the Size fact labels retain their previous policy.
+
+The tests also check error privacy, exact shifted offsets, repeated fact
+snapshots, deferred member parsing and all six PDF whitespace bytes. Applying
+the pre-fix production files as a Go overlay makes the regressions fail; the
+corrected implementation passes them. Fixture builders calculate prolog First,
+stream Length and xref offsets from the actual bytes, including multibyte
+non-PDF spaces, so a bad Length cannot mask a whitespace regression.
+
+The frozen public corpus still reports 527/527 default strict successes and
+526/527 NoRepair successes. The sole refusal is `RepairFreeLink` (site 29);
+there are no other errors. Successful reads record 126 head syntheses,
+335 head generation corrections and 227 Size lowerings. These facts overlap.
+The Size census remains (a) 227, (b) 0, (c) 0, (d) 0, with no Size refusals.
+
+All 1,054 strict/relaxed default snapshots match the PR base `eb33d42`, with
+zero read/serialization errors or differences. The comparison includes selected
+entries, object serialization, raw/decoded stream bytes, decode errors, Size and
+reader/discard state. The corpus tool materializes nonfree objects; this does not
+certify uninterpreted stream payloads.
+
+No dependency or PAC validation semantics changed. Private-corpus replay,
+the uacheck dependency pin, other operating systems and Go 1.27 are outside this
+verification. The fork PR has no configured CI checks. INVENTION flags: none.
+Open questions: none.
+
+The final gates passed on Linux with Go 1.26.0. They ran in
+`.git/f1e-validation/head`, a source snapshot whose six changed Go files were
+verified byte-for-byte against the checkout. Each gate used its own
+XDG_CONFIG_HOME. Generated samples stayed in that snapshot.
+
+```sh
+XDG_CONFIG_HOME="$PWD/../config-test" go test -p 1 ./...
+XDG_CONFIG_HOME="$PWD/../config-race" go test -race -p 1 ./pkg/pdfcpu/...
+XDG_CONFIG_HOME="$PWD/../config-vet" go vet ./...
+```
+
+The corpus and Size-census commands in the earlier report also passed.
+`git diff --check` passed in the source checkout. No full-gate failures remain.

@@ -313,6 +313,10 @@ func TestNoRepairRecoveryFamilies(t *testing.T) {
 
 // Object 4 stays lazy after the catalog and page tree have loaded.
 func noRepairLazyPDF(value string) []byte {
+	return noRepairLazyPDFWithProlog(value, "4 0 ")
+}
+
+func noRepairLazyPDFWithProlog(value, prolog string) []byte {
 	var b bytes.Buffer
 	b.WriteString("%PDF-1.7\n")
 	offsets := map[int]int{}
@@ -320,9 +324,9 @@ func noRepairLazyPDF(value string) []byte {
 		offsets[i+1] = b.Len()
 		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
 	}
-	content := "4 0 " + value
+	content := prolog + value
 	offsets[5] = b.Len()
-	fmt.Fprintf(&b, "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(content), content)
+	fmt.Fprintf(&b, "5 0 obj\n<< /Type /ObjStm /N 1 /First %d /Length %d >>\nstream\n%s\nendstream\nendobj\n", len(prolog), len(content), content)
 	offsets[6] = b.Len()
 	var records bytes.Buffer
 	for id := 0; id <= 6; id++ {

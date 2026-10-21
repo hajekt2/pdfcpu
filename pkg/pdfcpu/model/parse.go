@@ -480,7 +480,7 @@ func parseStringLiteral(line *string) (types.Object, error) {
 	return stringLiteral, nil
 }
 
-func parseHexLiteral(line *string) (types.Object, error) {
+func parseHexLiteral(c context.Context, line *string) (types.Object, error) {
 	if line == nil || len(*line) == 0 {
 		return nil, errBufNotAvailable
 	}
@@ -503,7 +503,11 @@ func parseHexLiteral(line *string) (types.Object, error) {
 		return nil, errHexLiteralNotTerminated
 	}
 
-	hexStr, ok := hexString(strings.TrimSpace(l[:eov]))
+	s := l[:eov]
+	if !RepairsForbidden(c) {
+		s = strings.TrimSpace(s)
+	}
+	hexStr, ok := hexString(s)
 	if !ok {
 		// Skip junk
 		*line = forwardParseBuf(l[eov:], 1)
@@ -939,7 +943,7 @@ func parseHexLiteralOrDict(c context.Context, l *string, level, maxDepth, valida
 		if log.ParseEnabled() {
 			log.Parse.Println("parseHexLiteralOrDict: value = Hex Literal")
 		}
-		if val, err = parseHexLiteral(l); err != nil {
+		if val, err = parseHexLiteral(c, l); err != nil {
 			return nil, err
 		}
 		if val == nil {
