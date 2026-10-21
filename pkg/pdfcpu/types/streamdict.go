@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package types
 
 import (
@@ -43,8 +45,9 @@ type StreamDict struct {
 	Raw               []byte // Encoded
 	Content           []byte // Decoded
 	//DCTImage          image.Image
-	IsPageContent bool
-	CSComponents  int
+	IsPageContent   bool
+	CSComponents    int
+	readRepairError error // frozen source-read refusal, retained by lazy decoders
 }
 
 // NewStreamDict creates a new PDFStreamDict for given PDFDict, stream offset and length.
@@ -60,6 +63,15 @@ func NewStreamDict(d Dict, streamOffset int64, streamLength *int64, streamLength
 		//nil,
 		false,
 		0,
+		nil,
+	}
+}
+
+// SetReadRepairError retains the reader's refusal for later filter decoding.
+// Once set, it cannot be cleared by a subsequent call.
+func (sd *StreamDict) SetReadRepairError(err error) {
+	if sd.readRepairError == nil {
+		sd.readRepairError = err
 	}
 }
 
@@ -414,7 +426,7 @@ func (sd *StreamDict) decodeLength(maxLen, maxDecodeBytes int64) ([]byte, error)
 			return nil, fmt.Errorf("stream filter[%d] %q: prepare parameters: %w", idx, f.Name, err)
 		}
 
-		fi, err := filter.NewFilter(f.Name, parms, maxDecodeBytes)
+		fi, err := filter.NewFilterWithRepairError(f.Name, parms, maxDecodeBytes, sd.readRepairError)
 		if err != nil {
 			return nil, fmt.Errorf("stream filter[%d] %q: construct: %w", idx, f.Name, err)
 		}

@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 // Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
 // recording of tokens the relaxed parser replaces. See README.md, "Fork note".
 
@@ -647,6 +649,11 @@ func processDictKeys(c context.Context, line *string, level, maxDepth, validatio
 		// Specifying the null object as the value of a dictionary entry (7.3.7, "Dictionary Objects")
 		// shall be equivalent to omitting the entry entirely.
 		// Retain null entries until duplicate keys have been checked.
+		if _, duplicate := d[string(*keyName)]; duplicate {
+			if err := RefuseRepair(c, RepairParserDuplicateKey); err != nil {
+				return nil, err
+			}
+		}
 		if err := insertKey(d, string(*keyName), val, validationMode); err != nil {
 			return nil, err
 		}
@@ -936,6 +943,9 @@ func parseHexLiteralOrDict(c context.Context, l *string, level, maxDepth, valida
 			return nil, err
 		}
 		if val == nil {
+			if err := RefuseRepair(c, RepairParserHex); err != nil {
+				return nil, err
+			}
 			recordDiscard(c, "hex")
 		}
 	}
@@ -1018,6 +1028,9 @@ func parseObjectValue(c context.Context, l *string, level, depthLimit, validatio
 		value, valStr, ok := parseBooleanOrNull(*l)
 		if ok {
 			if token := (*l)[:len(valStr)]; token != valStr {
+				if err := RefuseRepair(c, RepairParserKeyword); err != nil {
+					return nil, err
+				}
 				if validationMode != ValidationRelaxed {
 					return nil, fmt.Errorf("%w: %q", errInvalidBooleanOrNull, token)
 				}
@@ -1026,15 +1039,33 @@ func parseObjectValue(c context.Context, l *string, level, depthLimit, validatio
 			*l = forwardParseBuf(*l, len(valStr))
 			return value, nil
 		}
+		// Reject the nonstandard numeric prefixes accepted by the legacy parser.
+		if RepairsForbidden(c) {
+			normalized, _, _ := startParseNumericOrIndRef(*l)
+			_, rest := positionToNextWhitespaceOrChar(*l, "/<([]>%")
+			token := (*l)[:len(*l)-len(rest)]
+			if token == "" {
+				token = *l
+			}
+			if normalized != token || strings.Contains(token, ",") || strings.Contains(token, ".-") {
+				return nil, RefuseRepair(c, RepairParserNumber)
+			}
+		}
 		// Must be numeric or indirect reference:
 		// int 0 r
 		// int
 		// float
 		value, err := parseNumericOrIndRef(l)
 		if err == nil && value == nil {
+			if err := RefuseRepair(c, RepairParserToken); err != nil {
+				return nil, err
+			}
 			recordDiscard(c, "token")
 		}
 		if errors.Is(err, errIntegerRangeRepaired) {
+			if err := RefuseRepair(c, RepairParserInteger); err != nil {
+				return nil, err
+			}
 			recordDiscard(c, "integer-range")
 			value, err = types.Integer(0), nil
 		}
@@ -1111,7 +1142,7 @@ func ParseObjectWithPolicy(c context.Context, line *string, level, validationMod
 	if err == nil {
 		return ParseObjectResult{Object: value}, nil
 	}
-	if errors.Is(err, ErrMaxRecursionDepthExceeded) || c.Err() != nil {
+	if IsRepairRefused(err) || errors.Is(err, ErrMaxRecursionDepthExceeded) || c.Err() != nil {
 		return ParseObjectResult{}, err
 	}
 	if validationMode != ValidationRelaxed &&
@@ -1119,6 +1150,9 @@ func ParseObjectWithPolicy(c context.Context, line *string, level, validationMod
 		return ParseObjectResult{StrictFailure: err}, err
 	}
 	if !policyManagedParseError(err) {
+		if err := RefuseRepair(c, RepairParserFallback); err != nil {
+			return ParseObjectResult{}, err
+		}
 		*line = original
 		value, err = parseObject(c, line, level, depthLimit, validationMode, true)
 		return ParseObjectResult{Object: value}, err
@@ -1129,6 +1163,9 @@ func ParseObjectWithPolicy(c context.Context, line *string, level, validationMod
 		return result, err
 	}
 
+	if err := RefuseRepair(c, RepairParserFallback); err != nil {
+		return ParseObjectResult{}, err
+	}
 	*line = original
 	result.Object, err = parseObject(c, line, level, depthLimit, validationMode, true)
 	return result, err
@@ -1147,10 +1184,13 @@ func ParseObject(c context.Context, line *string, level int, maxDepth ...int) (t
 	depthLimit := parseObjectDepthLimit(maxDepth)
 	original := *line
 	value, err := parseObject(c, line, level, depthLimit, ValidationRelaxed, false)
-	if err == nil || errors.Is(err, ErrMaxRecursionDepthExceeded) || c.Err() != nil {
+	if err == nil || IsRepairRefused(err) || errors.Is(err, ErrMaxRecursionDepthExceeded) || c.Err() != nil {
 		return value, err
 	}
 
+	if err := RefuseRepair(c, RepairParserFallback); err != nil {
+		return nil, err
+	}
 	*line = original
 	return parseObject(c, line, level, depthLimit, ValidationRelaxed, true)
 }

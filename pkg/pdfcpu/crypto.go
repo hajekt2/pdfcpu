@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package pdfcpu
 
 // Functions dealing with PDF encryption.
@@ -1333,6 +1335,11 @@ func validateEncryptionVersion(c context.Context, ctx *model.Context) (err error
 			appendSpecViolation(&violations, err)
 		}
 	}
+	if len(violations) > 0 {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairEncryption, -1, -1); err != nil {
+			return err
+		}
+	}
 	for _, violation := range violations {
 		violation = attributeEncryptionError(ctx, violation)
 		if ctx.E.V == 5 {
@@ -1727,6 +1734,11 @@ func supportedEncryption(ctx *model.Context, d types.Dict) (enc *model.Enc, err 
 		return nil, err
 	}
 
+	if len(specViolations) > 0 || specViolation != nil {
+		if err := ctx.XRefTable.RefuseRepair(model.RepairEncryption, -1, -1); err != nil {
+			return nil, err
+		}
+	}
 	enc = &model.Enc{
 		O:     o,
 		OE:    oe,
@@ -1916,7 +1928,7 @@ func encryptBytes(b []byte, objNr, genNr int, encKey []byte, needAES bool, r int
 }
 
 // decryptBytes decrypts bb using RC4 or AES.
-func decryptBytes(b []byte, objNr, genNr int, encKey []byte, needAES bool, r int) ([]byte, error) {
+func decryptBytes(b []byte, objNr, genNr int, encKey []byte, needAES bool, r int, repairError ...error) ([]byte, error) {
 	if needAES {
 		k := encKey
 		if r != 5 && r != 6 {
@@ -1926,7 +1938,7 @@ func decryptBytes(b []byte, objNr, genNr int, encKey []byte, needAES bool, r int
 				return nil, err
 			}
 		}
-		return decryptAESBytes(b, k)
+		return decryptAESBytes(b, k, repairError...)
 	}
 
 	return applyRC4CipherBytes(b, objNr, genNr, encKey, needAES)
@@ -2015,7 +2027,7 @@ func encryptStringLiteral(sl types.StringLiteral, objNr, genNr int, key []byte, 
 	return &sl, nil
 }
 
-func decryptStringLiteral(sl types.StringLiteral, objNr, genNr int, key []byte, needAES bool, r int) (*types.StringLiteral, error) {
+func decryptStringLiteral(sl types.StringLiteral, objNr, genNr int, key []byte, needAES bool, r int, repairError ...error) (*types.StringLiteral, error) {
 	if sl.Value() == "" {
 		return &sl, nil
 	}
@@ -2025,7 +2037,7 @@ func decryptStringLiteral(sl types.StringLiteral, objNr, genNr int, key []byte, 
 		return nil, err
 	}
 
-	bb, err = decryptBytes(bb, objNr, genNr, key, needAES, r)
+	bb, err = decryptBytes(bb, objNr, genNr, key, needAES, r, repairError...)
 	if err != nil {
 		return nil, err
 	}
@@ -2056,7 +2068,7 @@ func encryptHexLiteral(hl types.HexLiteral, objNr, genNr int, key []byte, needAE
 	return &hl, nil
 }
 
-func decryptHexLiteral(hl types.HexLiteral, objNr, genNr int, key []byte, needAES bool, r int) (*types.HexLiteral, error) {
+func decryptHexLiteral(hl types.HexLiteral, objNr, genNr int, key []byte, needAES bool, r int, repairError ...error) (*types.HexLiteral, error) {
 	if hl.Value() == "" {
 		return &hl, nil
 	}
@@ -2066,7 +2078,7 @@ func decryptHexLiteral(hl types.HexLiteral, objNr, genNr int, key []byte, needAE
 		return nil, err
 	}
 
-	bb, err = decryptBytes(bb, objNr, genNr, key, needAES, r)
+	bb, err = decryptBytes(bb, objNr, genNr, key, needAES, r, repairError...)
 	if err != nil {
 		return nil, err
 	}
@@ -2202,14 +2214,14 @@ func decryptDeepObject(c context.Context, objIn types.Object, objNr, genNr int, 
 		}
 
 	case types.StringLiteral:
-		sl, err := decryptStringLiteral(obj, objNr, genNr, key, needAES, r)
+		sl, err := decryptStringLiteral(obj, objNr, genNr, key, needAES, r, model.RefuseRepair(c, model.RepairEncryption))
 		if err != nil {
 			return nil, err
 		}
 		return *sl, contextutil.Check(c)
 
 	case types.HexLiteral:
-		hl, err := decryptHexLiteral(obj, objNr, genNr, key, needAES, r)
+		hl, err := decryptHexLiteral(obj, objNr, genNr, key, needAES, r, model.RefuseRepair(c, model.RepairEncryption))
 		if err != nil {
 			return nil, err
 		}
@@ -2241,7 +2253,7 @@ func encryptStream(buf []byte, objNr, genNr int, encKey []byte, needAES bool, r 
 }
 
 // decryptStream decrypts a stream buffer using RC4 or AES.
-func decryptStream(buf []byte, objNr, genNr int, encKey []byte, needAES bool, r int) ([]byte, error) {
+func decryptStream(buf []byte, objNr, genNr int, encKey []byte, needAES bool, r int, repairError ...error) ([]byte, error) {
 	k := encKey
 	if r != 5 && r != 6 {
 		var err error
@@ -2252,7 +2264,7 @@ func decryptStream(buf []byte, objNr, genNr int, encKey []byte, needAES bool, r 
 	}
 
 	if needAES {
-		return decryptAESBytes(buf, k)
+		return decryptAESBytes(buf, k, repairError...)
 	}
 
 	return applyRC4Bytes(buf, k)
@@ -2312,7 +2324,16 @@ func encryptAESBytes(b, key []byte) ([]byte, error) {
 	return data, nil
 }
 
-func decryptAESBytes(b, key []byte) ([]byte, error) {
+func decryptAESBytes(b, key []byte, repairError ...error) ([]byte, error) {
+	var refusal error
+	if len(repairError) > 0 {
+		refusal = repairError[0]
+	}
+	// Standard decryption may mutate its buffer. Probe a copy when malformed
+	// padding must be refused, so the source remains intact on refusal.
+	if refusal != nil {
+		b = bytes.Clone(b)
+	}
 	if len(b) < 2*aes.BlockSize {
 		return nil, errAESCiphertextTooShort
 	}
@@ -2333,6 +2354,17 @@ func decryptAESBytes(b, key []byte) ([]byte, error) {
 	mode := cipher.NewCBCDecrypter(cb, iv)
 	mode.CryptBlocks(data, data)
 
+	if refusal != nil {
+		padding := int(data[len(data)-1])
+		if padding == 0 || padding > aes.BlockSize || padding > len(data) {
+			return nil, refusal
+		}
+		for _, b := range data[len(data)-padding:] {
+			if int(b) != padding {
+				return nil, refusal
+			}
+		}
+	}
 	// Remove padding.
 	// Note: For some reason not all AES ciphertexts are padded.
 	if len(data) > 0 && data[len(data)-1] <= 0x10 {

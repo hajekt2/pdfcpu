@@ -14,6 +14,8 @@
 	limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 // Modified in the hajekt2/pdfcpu fork (branch uacheck/discard-log): opt-in
 // recording of tokens the relaxed parser replaces. See README.md, "Fork note".
 
@@ -197,6 +199,7 @@ type XRefTable struct {
 	Valid            bool                      // true means successful validated against ISO 32000.
 	URIs             map[int]map[string]string // URIs for link checking
 	validationReport *ValidationReport
+	noRepair         bool // frozen read policy, also used by lazy source access
 
 	Optimized      bool
 	Watermarked    bool
@@ -219,6 +222,7 @@ func newXRefTable(conf *Configuration) (xRefTable *XRefTable) {
 	}
 	return &XRefTable{
 		Discards:          discards,
+		noRepair:          conf.NoRepair,
 		Table:             map[int]*XRefTableEntry{},
 		Names:             map[string]*Node{},
 		NameRefs:          map[string]NameMap{},
@@ -942,10 +946,18 @@ func (xRefTable *XRefTable) handleDanglingFree(m types.IntSet, head *XRefTableEn
 		}
 
 		if *entry.Generation == types.FreeHeadGeneration {
+			if *entry.Offset != 0 {
+				if err := xRefTable.RefuseRepair(RepairFreeLink, i, -1); err != nil {
+					return err
+				}
+			}
 			entry.Offset = &zero
 			continue
 		}
 
+		if err := xRefTable.RefuseRepair(RepairFreeLink, i, -1); err != nil {
+			return err
+		}
 		entry.Offset = head.Offset
 		next := int64(i)
 		head.Offset = &next
@@ -963,6 +975,9 @@ func (xRefTable *XRefTable) validateFreeList(f int, m types.IntSet, e *XRefTable
 		}
 		// verify if obj f is one of the free objects recorded.
 		if !m[f] {
+			if err := xRefTable.RefuseRepair(RepairFreeLink, f, -1); err != nil {
+				return nil, 0, err
+			}
 			if len(m) > 0 && lastValid == nil {
 				lastValid = e
 				f = lowestKey(m)
@@ -1002,6 +1017,9 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 	// Verify free object 0 as free list head.
 	head, _ := xRefTable.Find(0)
 	if head == nil {
+		if err := xRefTable.RefuseRepair(RepairFreeHead, 0, -1); err != nil {
+			return err
+		}
 		g0 := types.FreeHeadGeneration
 		head = &XRefTableEntry{Free: true, Offset: &zero, Generation: &g0}
 		xRefTable.Table[0] = head
@@ -1010,6 +1028,10 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 	// verify generation of 56535
 	if *head.Generation != types.FreeHeadGeneration {
 		// Fix generation for obj 0.
+		if err := xRefTable.RefuseRepair(RepairFreeGeneration, 0, -1); err != nil {
+			return err
+		}
+
 		*head.Generation = types.FreeHeadGeneration
 	}
 
@@ -1019,6 +1041,9 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 
 		// repair if necessary
 		if *head.Offset != 0 {
+			if err := xRefTable.RefuseRepair(RepairFreeLink, 0, -1); err != nil {
+				return err
+			}
 			*head.Offset = 0
 		}
 
