@@ -221,6 +221,7 @@ type ObjectStreamDict struct {
 	FirstObjOffset int
 	MaxDecodeBytes int64
 	ObjArray       Array
+	ObjectNumbers  []int // Source prolog identities, retained for NoRepair xref checks.
 }
 
 // NewObjectStreamDict creates a new ObjectStreamDict object.

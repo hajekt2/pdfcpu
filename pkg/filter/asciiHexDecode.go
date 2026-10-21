@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Modified in the hajekt2/pdfcpu fork: opt-in reader repair refusal. See NOREPAIR.md.
+
 package filter
 
 import (
@@ -65,15 +67,23 @@ func (f asciiHexDecode) DecodeLength(r io.Reader, maxLen int64) (io.Reader, erro
 	}
 
 	var p []byte
+	eod := false
 
 	// Remove any white space and cut off on eod
 	for i := range bb {
 		if bb[i] == eodHexDecode {
+			eod = true
 			break
 		}
 		if !bytes.ContainsRune([]byte{0x00, 0x09, 0x0A, 0x0C, 0x0D, 0x20}, rune(bb[i])) {
 			p = append(p, bb[i])
 		}
+	}
+
+	// Odd-nibble padding is defined only at EOD. A prefix may stop after
+	// complete bytes without requiring the remainder of the encoded stream.
+	if f.repairError != nil && !eod && (maxLen < 0 || maxLen > int64(len(p)/2)) {
+		return nil, f.repairError
 	}
 
 	// if len == odd add "0"

@@ -10,6 +10,8 @@ Object -1 means unknown; object 0 identifies a classic trailer or free-list head
 Offset -1 means unavailable, including decoded object-stream members. Other
 offsets are absolute file byte offsets. Stream errors can identify the stream's
 object header or data start. No error record stores document content or keys.
+Encryption dictionary walkers propagate typed refusals before adding source-key
+context.
 
 The policy is frozen in the xref table when `model.NewContext` creates it. Parser
 scopes and lazy member closures capture that policy. Changing the caller's
@@ -92,7 +94,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairXRefReconstruction` | `bypassXrefSection` refuses before replacing the table or scanning candidates. Its callers are `parseXRefStreamOrRepair`, `repairCorruptXRefSection`, hybrid failure in `parseTrailerDict`, and `dereferenceObjects`. `readXRefTable` refuses missing-final-section reconstruction before selecting offset zero. `offsetPrev` refuses scanning for a missing previous section when `Prev` is zero. Strict-mode reconstruction is covered. Existing typed refusals survive fallback wrappers unchanged. |
 | `RepairXRefSameLine` | `tryXRefSection`: taking subsection fields from the `xref` keyword's line. |
 | `RepairXRefShift` | `tryXRefSection`: skipping whitespace at the declared offset, finding `xref` on a later line, or assigning `Read.RepairOffset`. Thus the later shifted-object retry in `dereferenceAndLoad` cannot run. |
-| `RepairXRefEntry` | `parseXRefTableEntry` / `decodeSubsection`: stripping offset prefixes, malformed numeric widths, reclassifying in-use object zero, skipping zero or sub-header in-use offsets. `parseXRefTableSubSection`: skipping short rows or digesting entries beyond the declared count. `extractXRefTableEntriesFromXRefStream`: ignoring extra records outside Index. Incomplete rows that already fail retain their error or hit the guarded reconstruction route. |
+| `RepairXRefEntry` | `parseXRefTableEntry` / `decodeSubsection`: stripping offset prefixes, malformed numeric widths, reclassifying in-use object zero, skipping zero or sub-header in-use offsets. `extractXRefTableEntriesFromXRefStream` also rejects type-1 object zero and zero/sub-header source offsets before inserting an entry. `parseXRefTableSubSection`: skipping short rows or digesting entries beyond the declared count. `extractXRefTableEntriesFromXRefStream`: ignoring extra records outside Index. Incomplete rows that already fail retain their error or hit the guarded reconstruction route. |
 | `RepairXRefGeneration` | `parseXRefTableEntry` refuses the oversized generation that `decodeSubsection` would replace with zero. |
 | `RepairXRefSize` | `xRefStreamDict` selects bounded strict Index/Size parsing under either validation mode and translates correction candidates to this site. It never reaches the relaxed Size update. `parseTrailerSize` refuses discarding invalid Size. `Read` refuses final Size replacement after the object walk. |
 | `RepairXRefCycle` | `buildXRefTableStartingAt`: selecting an earlier epilog after revisiting an xref offset. |
@@ -119,8 +121,8 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairFreeLink` | `validateFreeList`: choosing replacement links or truncating broken/cyclic links. `EnsureValidFreeList`: resetting a nonzero head link. `handleDanglingFree`: linking omitted free objects or fixing a permanently deleted object's nonzero link. Writer-only recycling is outside the read call graph. |
 | `RepairRootVersion` | `identifyRootVersion`: accepting an invalid catalog Version, including the strict-mode silent ignore and relaxed version coercion. |
 | `RepairEncryption` | `supportedEncryption` and `validateEncryptionVersion`: accepted password-entry, permission and crypt-filter representation violations. `decryptAESBytes`: accepting absent or invalid AES padding; a copy protects the source while checking padding in NoRepair mode. Standard successful decryption remains allowed. |
-| `RepairObjectStreamIndex` | `buildObjectArrayForObjectStream`: accepting malformed or duplicate prolog object numbers instead of the declared member identities. |
-| `RepairFilterData` | Reader-created `StreamDict` retains this numeric error. `filter.flate.passThru` and `decodePostProcessRows` refuse unexpected EOF tolerance, including complete-row predictor output with a truncated zlib ending. `runLengthDecode.decode` refuses missing EOD. The error survives deferred stream or object-stream decoding. Bounded decoding that reaches its requested prefix is normal decoding. |
+| `RepairObjectStreamIndex` | `buildObjectArrayForObjectStream`: accepting malformed or duplicate prolog object numbers. `decompressXRefTableEntry` compares the retained prolog number at the requested index with the xref object number before assigning the member. Superseded members that have no selected xref entry need no identity assignment. |
+| `RepairFilterData` | Reader-created `StreamDict` retains this numeric error. `filter.flate.passThru` and `decodePostProcessRows` refuse unexpected EOF tolerance, including complete-row predictor output with a truncated zlib ending. `runLengthDecode.decode` and `asciiHexDecode.DecodeLength` refuse missing EOD on full decoding. ASCIIHex permits the standard odd final nibble only at EOD. The policy-managed LZW reader requires initial CLEAR, EOD, zero final padding bits, and a CLEAR or EOD when the code table is full. CCITT full decoding requires RTC/EOFB when EndOfBlock is true, which overrides Rows. EndOfBlock=false with a known row count stops at the declared rows without requiring a trailer. Existing unsupported CCITT forms remain unsupported; no damaged-row substitution is added. The error survives deferred stream or object-stream decoding. Bounded decoding that reaches its requested prefix is normal decoding. |
 
 The reconstruction-only helpers `registerXRefObjects`, `registerXRefEntry`,
 `processXRefRepairLine`, `processObject`, `parseAndLoad`, `isCatalogForRepair`
@@ -139,14 +141,14 @@ materialize values or create an internal representation.
 | --- | --- |
 | Bounded header/startxref search | Locating the declared syntax is ordinary reading. Accepting a displaced header, bad latest offset or malformed epilog is guarded separately. |
 | Classic, stream, hybrid, incremental and linearized traversal | Reading the selected entries and following declared Prev/XRefStm links follows PDF syntax. Newest entries supersede older entries without reconstruction. |
-| Unknown xref-stream entry types | PDF 7.5.8.3 requires treating these entries as null. The internal free-entry representation is decoding, although any later free-list repair is still refused. |
+| Unknown xref-stream entry types | PDF 7.5.8.3 requires treating these entries as null. An explicit `XRefTableEntry.Null` marker distinguishes these placeholders from source free entries. NoRepair excludes them from free-list membership without linking or reclassifying them. Default reads retain the legacy bookkeeping. A source free-list link to a null placeholder is still a broken link and refuses. |
 | Xref W defaults; compressed-object generation zero | The standard defines these implicit values. |
 | Reference and bootstrap resolution | Dereferencing valid direct/indirect Length, First, N, filter and encryption entries preserves the source value. Undefined indirect references resolve to null under 7.3.10. |
 | Direct PDF 2.0 Info materialization | `materializeDirectInfoDict` creates an internal indirect object for standard direct Info syntax. It allocates beyond existing objects without repairing the source. |
 | Recursive parser | PDF whitespace, comments, name hex escapes, string-literal escapes, odd hex-nibble padding and dropping null-valued dictionary entries are standard syntax rules. Integer/real lookahead distinguishes references from separate numeric values. |
 | Object-stream prolog and member slicing | The declared First/N/index offsets select decoded members. NUL is PDF whitespace. Comments are lexical syntax. Bounds, counts and decreasing offsets already return errors. Policy closures retain refusal through lazy parsing. |
 | Standard security handler | Password authentication, key derivation, RC4/AES decryption, signature-string exclusions, Identity filters and EncryptMetadata=false follow declared security settings. Deriving a decrypted stream's Length with `ensureStreamLength` is decoding, not a replacement of the encoded source extent. |
-| Filter decoding | ASCIIHex, ASCII85, LZW, Flate predictors, RunLength, CCITT and DCT decode their declared representation. Predictor defaults and CCITT Rows/Height derivation supply decoder parameters without changing the source dictionary. Prefix decoding can stop at a requested length. Malformed Flate/RunLength tolerance is guarded separately. |
+| Filter decoding | ASCIIHex, ASCII85, LZW, Flate predictors, RunLength, CCITT and DCT decode their declared representation. Predictor defaults and CCITT Rows/Height derivation supply decoder parameters without changing the source dictionary. Prefix decoding can stop at a requested length. Malformed termination tolerance in Flate, RunLength, ASCIIHex, LZW and CCITT is guarded separately. |
 | Opaque image/unsupported filters | Preserving encoded DCT/JPX/JBIG2 bytes, or leaving an unsupported stream undecoded, does not replace source bytes. A successful read does not certify every image/content codec. |
 | Reference counts, caches, resource budgets and statistics | These are internal bookkeeping. Cancellation and resource-limit failures never yield a successful read. |
 | Validation, content interpretation, optimization and writing | These are outside initial syntax loading and the lazy syntax decoder. Their changes invalidate a read certificate; callers must not reuse one after these operations. |
@@ -215,3 +217,71 @@ The serialized, isolated run passed; no test source was changed for this issue.
 The existing parser/model and discard-log tests are retained unchanged. The
 uacheck dependency pin and product proof flags are outside this fork change.
 No PAC validation semantics or RE behavior claims are introduced.
+
+## Review corrections and Size analysis, 2026-10-21
+
+All five findings from the independent review of `ed88e44` reproduced against
+`0747c45`. The corrections cover deferred codec termination, type-1 xref-stream
+source offsets, object-stream member identities, encryption refusal privacy,
+and standard unknown-type null resolution. `read_norepair_review_test.go`
+retains the reviewer's generated reproductions. `pkg/filter/norepair_test.go`
+also covers full and prefix decoding, odd ASCIIHex nibble padding, LZW final-bit
+padding and table exhaustion under both EarlyChange values, valid LZW resets,
+CCITT RTC/EOFB, EndOfBlock=false, byte alignment and BlackIs1. Default decoding
+is checked alongside the policy-managed cases. Empty filtered streams retain
+deferred decoding under NoRepair, so an empty-data cache cannot bypass required
+termination checks.
+These classifications follow ISO 32000-1 sections 7.4.2 (ASCIIHex), 7.4.4.2
+(LZW), 7.4.5 (CCITT), 7.5.7 (object streams) and 7.5.8.3 (xref entry types).
+
+The `RepairXRefSize` policy is unchanged. ISO 32000-1:2008
+[7.5.5, Table 15](https://opensource.adobe.com/dc-acrobat-sdk-docs/pdfstandards/PDF32000_2008.pdf)
+defines Size as one greater than the highest object number across the combined
+xref sections. It also requires a conforming reader to ignore entries with
+numbers greater than Size. Section 7.5.8.2, Table 17 gives the same meaning for
+xref streams. Thus the intended numbered range ends at Size-1. The literal
+ignore sentence says greater than Size; an entry exactly equal to Size already
+violates the one-greater definition. The census includes this boundary explicitly
+rather than treating it as conforming. No new allowance follows from this analysis.
+
+The optional census reads the selected xref sections with the ordinary reader
+and observes Size before `Read` replaces it. It classifies only files whose
+first NoRepair refusal is `RepairXRefSize`. Early Size parsing or Index/Size
+corrections fall into (d), rather than using an already-corrected value as the
+source declaration. For a smaller Size, it materializes objects and counts
+matching-generation indirect references in all selected in-use object values
+and the selected trailer Root, Info, Encrypt, ID and direct Info values. This
+includes references from unreachable objects. It does not interpret stream
+payloads or claim document-level reachability.
+
+On the frozen public corpus, 227 of 527 files first refused at `RepairXRefSize`:
+
+| Subclass | Files / 227 Size refusals | Effect of correcting Size on visible in-use objects |
+| --- | --- | --- |
+| (a) Declared Size exceeds highest selected xref entry + 1. | 227 | Lowering the bound cannot remove a selected in-use entry: every selected entry is already below both bounds. References to absent entries still resolve to null. This is a bound correction with no change to the selected in-use object set. |
+| (b) Declared Size is smaller, and present in-use objects at or above it have matching-generation references. | 0 | Raising the bound can expose previously excluded in-use objects and change reference results. Entries above Size are explicitly missing under 7.5.5; equality also violates its one-greater definition. This can change document content. |
+| (c) Declared Size is smaller, but its extra objects have no such references. | 0 | Raising the bound can still change which present in-use objects a reader can enumerate or explicitly dereference. The selected graph has no observed references to them; enumeration or explicit dereferencing can still expose them. If all extra entries are free, no additional in-use object becomes visible. |
+| (d) Other, including invalid Size, early Index correction, or a later model mismatch without a selected-entry bound mismatch. | 0 | The effect depends on the defect; this class supplies no general argument that correction preserves object selection. |
+
+The other 300 files are outside this Size-refusal denominator. The public run
+contains no smaller-Size examples, so (b) and (c) describe standards-based effects,
+not observed changes in those public files. Case (a) alone does not authorize a
+policy change. The current reader still refuses all 227 files.
+
+Reproduce both measurements:
+
+```sh
+go run ./_scripts/norepair-corpus.go /home/haja/work/uacheck-corpus/public
+PDFCPU_NOREPAIR_CORPUS=/home/haja/work/uacheck-corpus/public go test ./pkg/pdfcpu -run '^TestNoRepairXRefSizeCensus$' -count=1 -v
+```
+
+After these corrections, the full-suite command `go test -p 1 ./...`,
+`go test -race -p 1 ./pkg/pdfcpu/...`, `go vet ./...` and `git diff --check`
+passed on Linux with Go 1.26.0. The full and race suites used separate isolated
+XDG_CONFIG_HOME directories. Generated sample changes were removed afterward.
+The public corpus still loaded 527/527 by default and 299/527 under NoRepair,
+with 227 Size refusals and one free-link refusal. All 1,054 strict/relaxed default
+snapshots matched the independent review's prior snapshots, with zero errors or
+differences. Private-corpus replay and other operating systems were not tested.
+No PAC validation semantics, new dependencies or additional normalization
+allowances were introduced.

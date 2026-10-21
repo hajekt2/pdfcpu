@@ -69,6 +69,7 @@ var zero int64 = 0
 // Array, Integer, Float, Name, StringLiteral, HexLiteral, Boolean
 type XRefTableEntry struct {
 	Free            bool
+	Null            bool // Unknown xref-stream type, resolves to null rather than a free-list member.
 	Offset          *int64
 	Generation      *int
 	Incr            int // TODO
@@ -917,6 +918,11 @@ func (xRefTable *XRefTable) freeObjects() types.IntSet {
 
 	for k, v := range xRefTable.Table {
 		if v != nil && v.Free && k > 0 {
+			// Null placeholders are not source free entries. Preserve the legacy
+			// bookkeeping when repairs are enabled.
+			if v.Null && xRefTable.RepairsForbidden() {
+				continue
+			}
 			m[k] = true
 		}
 	}

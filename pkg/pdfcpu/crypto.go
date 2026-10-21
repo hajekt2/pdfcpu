@@ -2173,6 +2173,9 @@ func decryptDict(c context.Context, d types.Dict, objNr, genNr int, key []byte, 
 		}
 		s, err := decryptDeepObject(c, d[k], objNr, genNr, key, needAES, r)
 		if err != nil {
+			if model.IsRepairRefused(err) {
+				return err
+			}
 			return fmt.Errorf("decrypt dict entry %s: %w", k, err)
 		}
 		if s != nil {

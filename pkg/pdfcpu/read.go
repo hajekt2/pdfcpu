@@ -655,6 +655,7 @@ func buildObjectArrayForObjectStream(c context.Context, osd *types.ObjectStreamD
 				return nil, model.RefuseRepair(c, model.RepairObjectStreamIndex)
 			}
 			objectNumbers[object] = true
+			osd.ObjectNumbers = append(osd.ObjectNumbers, object)
 		}
 		offset, err := strconv.Atoi(objs[i+1])
 		if err != nil {
@@ -832,7 +833,7 @@ func createXRefTableEntryFromXRefStream(entryType int64, objNr int, c2, c3, offE
 		}
 		var next int64
 		var g int
-		xRefTableEntry = model.XRefTableEntry{Free: true, Offset: &next, Generation: &g, Incr: incr}
+		xRefTableEntry = model.XRefTableEntry{Free: true, Null: true, Offset: &next, Generation: &g, Incr: incr}
 	}
 
 	return xRefTableEntry
@@ -932,6 +933,11 @@ func extractXRefTableEntriesFromXRefStream(buf []byte, offExtra int64, xsd *type
 		c2 := bufToInt64(buf[i+i1 : i+i1+i2])
 		c3 := bufToInt64(buf[i+i1+i2 : i+i1+i2+i3])
 
+		if c1 == 1 && (objNr == 0 || c2 < 9) {
+			if err := ctx.XRefTable.RefuseRepair(model.RepairXRefEntry, objNr, c2); err != nil {
+				return err
+			}
+		}
 		entry := createXRefTableEntryFromXRefStream(c1, objNr, c2, c3, offExtra, ctx.Read.ObjectStreams, incr)
 		ctx.Table[objNr] = &entry
 		j++
@@ -3634,8 +3640,9 @@ func saveDecodedStreamContent(ctx *model.Context, sd *types.StreamDict, objNr, g
 		log.Read.Printf("saveDecodedStreamContent: begin decode=%t\n", decode)
 	}
 
-	// Special case: If the length of the encoded data is 0, we do not need to decode anything.
-	if len(sd.Raw) == 0 {
+	// Empty filtered data still needs its termination checked on a NoRepair
+	// decode. Caching it as decoded would bypass the deferred codec checks.
+	if len(sd.Raw) == 0 && (ctx == nil || !ctx.XRefTable.RepairsForbidden() || len(sd.FilterPipeline) == 0) {
 		sd.Content = sd.Raw
 		return nil
 	}
@@ -3699,6 +3706,12 @@ func decompressXRefTableEntry(xRefTable *model.XRefTable, objNr int, entry *mode
 	}
 
 	// Get indexed object from ObjectStreamDict.
+	if xRefTable.RepairsForbidden() {
+		i := *entry.ObjectStreamInd
+		if i < 0 || i >= len(sd.ObjectNumbers) || sd.ObjectNumbers[i] != objNr {
+			return xRefTable.RefuseRepair(model.RepairObjectStreamIndex, objNr, -1)
+		}
+	}
 	o, err := sd.IndexedObject(*entry.ObjectStreamInd)
 	if err != nil {
 		return fmt.Errorf("decompressXRefTableEntry: problem dereferencing object stream %d: %w", *entry.ObjectStream, err)
