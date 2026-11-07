@@ -1041,6 +1041,11 @@ func (xRefTable *XRefTable) EnsureValidFreeList() error {
 		}
 	}
 
+	// A compressed entry has no offset, so the free list cannot continue from it.
+	if head.Compressed {
+		return fmt.Errorf("EnsureValidFreeList: free list head obj#0 is compressed")
+	}
+
 	// ISO 32000-1 7.5.4 reserves generation 65535 for object 0.
 	if *head.Generation != types.FreeHeadGeneration {
 		*head.Generation = types.FreeHeadGeneration
