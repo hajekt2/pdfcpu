@@ -102,6 +102,16 @@ does not infer missing xref-stream records from an oversized implicit Index,
 scan for missing entries, raise Size, or authorize any correction that changes
 which objects resolve. All other repair sites keep their existing policy.
 
+## Accepted duplicate dictionary key
+
+A repeated dictionary key is not a repair and carries no message. The later
+non-null value replaces the earlier one, and a null value removes the key
+instead of storing it, which is the same as omitting the entry (ISO 32000-1
+7.3.7). `insertKey` applies this in every validation mode, so no read refuses
+on a duplicate key and `RepairParserDuplicateKey` stays a reserved enum value.
+This changes the read's accepted source set; it does not authorize any other
+parser recovery.
+
 ## Certificate scope
 
 A successful initial read covers the initial phases only. A lazy member can
@@ -159,7 +169,7 @@ errors, cancellation and resource-limit errors may still be returned directly.
 | `RepairParserInteger` | `parseObjectValue`: an out-of-range integer becoming zero. |
 | `RepairParserFallback` | `ParseObjectWithPolicy` and `model.ParseObject`: entering the repair parser after a failed first pass, including junk keys and missing-value/EOL substitution in `processDictKeys`. It refuses before the second parse. |
 | `RepairParserKeyword` | `parseObjectValue`: case correction for true, false or null. |
-| `RepairParserDuplicateKey` | `processDictKeys`: relaxed duplicate-key replacement, before insertion. |
+| `RepairParserDuplicateKey` | Reserved enum value. A repeated dictionary key is accepted, not repaired (see below). |
 | `RepairParserNumber` | `parseObjectValue`: stripping nonstandard numeric prefixes, changing a comma decimal separator or accepting a misplaced decimal sign. |
 | `RepairObjectHeader` | `readObjectAttributes`: filtering junk prolog bytes, missing generation or the abbreviated bj marker accepted by `ParseObjectAttributes`. `object`: accepting a mismatched number or generation at the declared offset. |
 | `RepairObjectNull` | `object`: treating an empty indirect-object body as null. |

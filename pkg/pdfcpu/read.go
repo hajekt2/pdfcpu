@@ -821,11 +821,13 @@ func createXRefTableEntryFromXRefStream(entryType int64, objNr int, c2, c3, offE
 		}
 		objNumberRef := int(c2)
 		objIndex := int(c3)
+		g := 0
 
 		xRefTableEntry =
 			model.XRefTableEntry{
 				Free:            false,
 				Compressed:      true,
+				Generation:      &g,
 				ObjectStream:    &objNumberRef,
 				ObjectStreamInd: &objIndex,
 				Incr:            incr}

@@ -43,7 +43,6 @@ var (
 	errArrayCorrupt            = errors.New("parse: corrupt array")
 	errArrayNotTerminated      = errors.New("parse: unterminated array")
 	errDictionaryNotTerminated = fmt.Errorf("parse: unterminated dictionary: %w", ErrDictionaryCorrupt)
-	errDictionaryDuplicateKey  = errors.New("parse: duplicate key")
 	errInvalidBooleanOrNull    = errors.New("parse: invalid boolean or null keyword")
 	errHexLiteralCorrupt       = errors.New("parse: corrupt hex literal")
 	errHexLiteralNotTerminated = errors.New("parse: hex literal not terminated")
@@ -570,24 +569,20 @@ func parseName(line *string) (*types.Name, error) {
 	return &nameObj, nil
 }
 
-func insertKey(d types.Dict, key string, val types.Object, validationMode int) error {
-	if _, found := d[key]; !found {
-		d[key] = val
-	} else {
-		if validationMode != ValidationRelaxed {
-			return fmt.Errorf("%w: %q", errDictionaryDuplicateKey, key)
-		}
-		if val != nil {
-			d[key] = val
-		}
-		ShowDigestedSpecViolation(fmt.Sprintf("duplicate key \"%s\"", key))
+// insertKey applies the accepted duplicate-key semantics: a repeated name is
+// not an error and carries no message, the later non-null value replaces the
+// earlier one, and a null value removes the key instead of storing it.
+func insertKey(d types.Dict, key string, val types.Object) {
+	if val == nil {
+		delete(d, key)
+		return
 	}
+
+	d[key] = val
 
 	if log.ParseEnabled() {
 		log.Parse.Printf("ParseDict: dict[%s]=%v\n", key, val)
 	}
-
-	return nil
 }
 
 func dictString(l string) bool {
@@ -651,16 +646,9 @@ func processDictKeys(c context.Context, line *string, level, maxDepth, validatio
 		}
 
 		// Specifying the null object as the value of a dictionary entry (7.3.7, "Dictionary Objects")
-		// shall be equivalent to omitting the entry entirely.
-		// Retain null entries until duplicate keys have been checked.
-		if _, duplicate := d[string(*keyName)]; duplicate {
-			if err := RefuseRepair(c, RepairParserDuplicateKey); err != nil {
-				return nil, err
-			}
-		}
-		if err := insertKey(d, string(*keyName), val, validationMode); err != nil {
-			return nil, err
-		}
+		// shall be equivalent to omitting the entry entirely, so a repeated key
+		// replaces the earlier value and a null value removes the key.
+		insertKey(d, string(*keyName), val)
 
 		// We are positioned on the char behind the last parsed dict value.
 		if len(l) < 2 {
@@ -1149,8 +1137,7 @@ func ParseObjectWithPolicy(c context.Context, line *string, level, validationMod
 	if IsRepairRefused(err) || errors.Is(err, ErrMaxRecursionDepthExceeded) || c.Err() != nil {
 		return ParseObjectResult{}, err
 	}
-	if validationMode != ValidationRelaxed &&
-		(errors.Is(err, errDictionaryDuplicateKey) || errors.Is(err, errInvalidBooleanOrNull)) {
+	if validationMode != ValidationRelaxed && errors.Is(err, errInvalidBooleanOrNull) {
 		return ParseObjectResult{StrictFailure: err}, err
 	}
 	if !policyManagedParseError(err) {
