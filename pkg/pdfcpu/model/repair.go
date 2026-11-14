@@ -50,7 +50,7 @@ const (
 	RepairParserInteger
 	RepairParserFallback
 	RepairParserKeyword
-	RepairParserDuplicateKey
+	RepairParserDuplicateKey // Reserved: a duplicate key is accepted; the later value wins and a null removes it.
 	RepairParserNumber
 	RepairObjectHeader
 	RepairObjectNull

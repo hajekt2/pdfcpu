@@ -252,6 +252,48 @@ func TestNoRepairFreeListShiftStillRefused(t *testing.T) {
 	}
 }
 
+// A duplicate dictionary key is not a repair: NoRepair accepts it under both
+// validation modes, the later non-null value wins and a null value removes the
+// key. The frozen open chain has no duplicate-key message at all.
+func TestNoRepairAcceptsDuplicateDictionaryKey(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		lang    string
+		want    types.Object
+		removed bool
+	}{
+		{"later value wins", "(en) /Lang (fr)", types.StringLiteral("fr"), false},
+		{"null removes the key", "(en) /Lang null", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := discardClassic(discardObjects(tc.lang), "", false, "")
+			for _, enabled := range []bool{false, true} {
+				for _, mode := range []int{model.ValidationStrict, model.ValidationRelaxed} {
+					ctx, err := noRepairRead(data, enabled, mode)
+					if err != nil {
+						t.Fatalf("noRepair=%t mode=%d: %v", enabled, mode, err)
+					}
+					d, ok := ctx.Table[1].Object.(types.Dict)
+					if !ok {
+						t.Fatalf("catalog is %T, not a dict", ctx.Table[1].Object)
+					}
+					got, found := d["Lang"]
+					if tc.removed {
+						if found {
+							t.Fatalf("noRepair=%t mode=%d: Lang = %v; want it removed", enabled, mode, got)
+						}
+					} else if !found || got != tc.want {
+						t.Fatalf("noRepair=%t mode=%d: Lang = %v (found %t); want %v", enabled, mode, got, found, tc.want)
+					}
+					if ctx.NoRepairNormalizations() != (model.NoRepairNormalizations{}) {
+						t.Fatal("duplicate key recorded as a normalization")
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestNoRepairRecoveryFamilies(t *testing.T) {
 	clean := discardClassic(discardObjects("(en)"), "", false, "")
 	replace := func(old, new string) []byte { return bytes.Replace(clean, []byte(old), []byte(new), 1) }
@@ -288,7 +330,6 @@ func TestNoRepairRecoveryFamilies(t *testing.T) {
 		{"integer range", catalog("999999999999999999999999999999999999"), model.RepairParserInteger},
 		{"junk key fallback", malformedCatalogKeyPDF(t), model.RepairParserFallback},
 		{"keyword case", catalog("TRUE"), model.RepairParserKeyword},
-		{"duplicate key", catalog("(en) /Lang (fr)"), model.RepairParserDuplicateKey},
 		{"numeric prefix", catalog("0+3"), model.RepairParserNumber},
 		{"comma decimal", catalog("1,2"), model.RepairParserNumber},
 		{"misplaced decimal sign", catalog(".-5"), model.RepairParserNumber},
