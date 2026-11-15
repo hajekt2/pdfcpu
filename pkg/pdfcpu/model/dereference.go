@@ -34,6 +34,9 @@ import (
 // ErrExpectedDict signals that a PDF object is not a dictionary.
 var ErrExpectedDict = errors.New("expected types.Dict")
 
+// ErrInvalidXRefOffset is returned when an in-use offset-zero entry is referenced.
+var ErrInvalidXRefOffset = errors.New("in-use xref entry has offset 0")
+
 func processDictRefCounts(xRefTable *XRefTable, d types.Dict, depth int) error {
 	if err := xRefTable.CheckRecursionDepth("reference count traversal", depth); err != nil {
 		return err
@@ -110,6 +113,10 @@ func (xRefTable *XRefTable) indRefToObject(ir *types.IndirectRef, decodeLazy boo
 	entry, found := xRefTable.FindTableEntryForIndRef(ir)
 	if !found || entry.Free {
 		return nil, 0, nil
+	}
+
+	if entry.Offset != nil && *entry.Offset == 0 && entry.Object == nil && !entry.Compressed {
+		return nil, 0, fmt.Errorf("object %d: %w", ir.ObjectNumber.Value(), ErrInvalidXRefOffset)
 	}
 
 	if l, ok := entry.Object.(types.LazyObjectStreamObject); ok && decodeLazy {
