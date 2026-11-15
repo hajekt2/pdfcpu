@@ -385,10 +385,7 @@ func createXRefTableEntry(entryType string, objNr int, offset, offExtra int64, g
 				model.ShowRepaired("obj#0")
 				return entry, true
 			}
-			if log.InfoEnabled() {
-				log.Info.Printf("createXRefTableEntry: Skip entry for in use object #%d with offset 0\n", objNr)
-			}
-			return entry, false
+			return entry, true
 		}
 
 		if offset < 9 {
@@ -469,15 +466,6 @@ func parseXRefTableEntry(xRefTable *model.XRefTable, fields []string, objNr int,
 		}
 
 	}
-	if entryType == "n" && objNr > 0 && offset == 0 {
-		err := model.WithValidationErrorObject(errors.New("in-use xref entry has offset 0"), objNr)
-		if xRefTable.ValidationMode == model.ValidationStrict {
-			return fmt.Errorf("object %d: %w", objNr, err)
-		}
-		xRefTable.AddValidationNotice(model.NewValidationNotice(model.NoticePhaseRead, model.NoticeSkipped, err.Error(), err))
-		return nil
-	}
-
 	entry, ok := createXRefTableEntry(entryType, objNr, offset, offExtra, generation, incr)
 	if !ok {
 		return nil
